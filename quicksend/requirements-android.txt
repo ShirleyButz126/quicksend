@@ -1,0 +1,8 @@
+# QuickSend Android APK 依赖
+# 这是传给 python-for-android 的 requirements
+python3
+kivy==2.3.0
+flask
+werkzeug
+pillow
+# 注意：win32com, wintypes, pywebview 都不能在这里

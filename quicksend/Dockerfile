@@ -1,0 +1,46 @@
+# Stage 1: Build Frontend
+FROM --platform=$BUILDPLATFORM node:18-alpine as frontend-builder
+
+WORKDIR /app-frontend
+
+# Copy package files first to leverage cache
+COPY static/package.json static/package-lock.json ./
+RUN npm install
+
+# Copy source code and build
+COPY static/ ./
+RUN npm run build
+
+# Stage 2: Runtime
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    QUICKSEND_NO_BROWSER=1 \
+    HEADLESS=1 \
+    PORT=8000
+
+WORKDIR /app
+
+# Install system dependencies for potential compilation (e.g. Pillow on 32-bit/ARM)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libjpeg-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+# Remove pywebview from requirements as it's not needed for headless Docker and requires desktop libs
+RUN sed -i '/pywebview/d' requirements.txt && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY . /app
+
+# Overwrite static/dist with the freshly built frontend
+COPY --from=frontend-builder /app-frontend/dist /app/static/dist
+
+EXPOSE 8000
+
+RUN mkdir -p /app/uploads
+
+CMD ["python", "app.py"]

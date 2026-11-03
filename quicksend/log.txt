@@ -1,0 +1,6 @@
+[Metadata] 初始化创建: D:\QuickSend-1.0.6\quicksend\quicksend\metadata.json
+DEBUG: Loading sessions from D:\QuickSend-1.0.6\quicksend\quicksend\sessions.json
+DEBUG: No sessions found
+[Metadata] 已存在: D:\QuickSend-1.0.6\quicksend\quicksend\metadata.json
+DEBUG: Loading sessions from D:\QuickSend-1.0.6\quicksend\quicksend\sessions.json
+DEBUG: No sessions found
