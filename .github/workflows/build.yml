@@ -74,7 +74,14 @@ jobs:
         # 软链接 Buildozer 期望的位置 → 我们的 SDK
         mkdir -p ~/.buildozer/android/platform
         ln -sf $ANDROID_HOME ~/.buildozer/android/platform/android-sdk 2>/dev/null || true
-        ln -sf $ANDROID_HOME/platform-tools ~/.buildozer/android/platform/android-sdk/platform-tools 2>/dev/null || true
+
+        # Buildozer 1.5.0 硬要找旧的 tools/bin/sdkmanager（新版 SDK 已迁到 cmdline-tools）
+        mkdir -p $ANDROID_HOME/tools/bin
+        ln -sf $ANDROID_HOME/cmdline-tools/latest/bin/* $ANDROID_HOME/tools/bin/ 2>/dev/null || true
+
+        # NDK 软链（Buildozer 1.5.0 下载的是 r28c，我们装 25 但给它个路径就行）
+        mkdir -p $ANDROID_HOME/ndk
+        ln -sf $ANDROID_HOME/ndk/25.2.9519653 ~/.buildozer/android/platform/android-ndk-r28c 2>/dev/null || true
 
         echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
         echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
