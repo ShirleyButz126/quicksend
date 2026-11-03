@@ -39,7 +39,7 @@ jobs:
     - name: 安装 Buildozer + Cython + python-for-android
       run: |
         pip install --upgrade pip setuptools wheel
-        pip install buildozer==1.5.0 cython==3.0.11 python-for-android==20240609
+        pip install buildozer==1.5.0 cython==3.0.11 python-for-android==2024.1.21
 
     - name: 预装 Android SDK + 接受所有 License
       run: |
