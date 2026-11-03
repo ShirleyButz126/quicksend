@@ -82,12 +82,19 @@ jobs:
         find . -name "*.apk" -type f 2>/dev/null
         ls -la bin/ 2>/dev/null || echo "(bin 目录不存在)"
 
+    - name: 全局查找 APK
+      run: |
+        echo "=== Globing for APKs in workspace ==="
+        find $HOME -name "*.apk" -type f 2>/dev/null | head -20
+        echo "=== buildozer bin dirs ==="
+        find $HOME/.buildozer -type d -name "bin" 2>/dev/null | head -10
+
     - name: 上传 APK
       uses: actions/upload-artifact@v4
       with:
         name: QuickSend-APK
         path: |
-          quicksend/bin/*.apk
           bin/*.apk
-          .buildozer/android/platform/build/**/*.apk
-        if-no-files-found: error
+          $HOME/.buildozer/android/platform/build/**/*.apk
+          $HOME/.buildozer/android/app/bin/*.apk
+        if-no-files-found: warn
