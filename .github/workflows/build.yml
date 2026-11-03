@@ -41,6 +41,49 @@ jobs:
         pip install --upgrade pip setuptools wheel
         pip install buildozer==1.5.0 cython==3.0.11
 
+    - name: 预装 Android SDK + 接受所有 License
+      run: |
+        export ANDROID_HOME=$HOME/Android/Sdk
+        export ANDROID_SDK_ROOT=$ANDROID_HOME
+        mkdir -p $ANDROID_HOME/cmdline-tools $ANDROID_HOME/platform-tools
+        mkdir -p ~/.android
+
+        # 下载 cmdline-tools
+        cd /tmp
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip
+        unzip -q commandlinetools-linux-10406996_latest.zip -d $ANDROID_HOME/cmdline-tools
+        mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+
+        export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
+
+        # 方式 1：传统 yes | sdkmanager --licenses
+        yes | sdkmanager --licenses 2>&1 | tail -5 || true
+
+        # 方式 2：写 accepted licenses 文件（Buildozer 旧版 sdkmanager 用这个）
+        mkdir -p $ANDROID_HOME/licenses
+        echo -e "8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > $ANDROID_HOME/licenses/android-sdk-license
+        echo -e "84831b9409646a918e30573bab4c9c91346d8abd" > $ANDROID_HOME/licenses/android-sdk-preview-license
+
+        # 方式 3：写 repositories.cfg 跳过 license 检查
+        echo "### User Sources for Android SDK Manager" > ~/.android/repositories.cfg
+
+        # 装 Build-Tools 37（Buildozer 1.5.0 硬要这个版本）
+        sdkmanager --licenses 2>&1 | tail -3
+        yes | sdkmanager "build-tools;37.0.0" "platform-tools" "platforms;android-33" "ndk;25.2.9519653" 2>&1 | tail -20
+
+        # 软链接 Buildozer 期望的位置 → 我们的 SDK
+        mkdir -p ~/.buildozer/android/platform
+        ln -sf $ANDROID_HOME ~/.buildozer/android/platform/android-sdk 2>/dev/null || true
+        ln -sf $ANDROID_HOME/platform-tools ~/.buildozer/android/platform/android-sdk/platform-tools 2>/dev/null || true
+
+        echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+        echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+        echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
+        echo "=== SDK 验证 ==="
+        ls $ANDROID_HOME/build-tools/
+        ls $ANDROID_HOME/build-tools/37.0.0/aidl 2>/dev/null && echo "aidl OK!" || echo "aidl MISSING!"
+
     - name: Buildozer 构建 APK
       working-directory: quicksend
       run: |
@@ -49,33 +92,11 @@ jobs:
         export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
         export JAVA_HOME=$JAVA_HOME
 
-        # 第 1 轮：让 Buildozer 初始化 SDK 目录结构 + 声明需要的 build-tools 版本
-        # 会失败（aidl 找不到），但 SDK 目录会被创建
-        rm -rf ~/.buildozer
-        set +e
-        buildozer android debug 2>&1 | tail -50
-        set -e
-
-        # 第 2 轮：接受 Buildozer 自己 SDK 目录下的所有 license
-        SDKMAN=$HOME/.buildozer/android/platform/android-sdk/cmdline-tools/latest/bin/sdkmanager
-        if [ -z "$SDKMAN" ] || [ ! -x "$SDKMAN" ]; then
-          SDKMAN=$(find $HOME/.buildozer -name sdkmanager -type f 2>/dev/null | head -1)
-        fi
-        echo "Using sdkmanager: $SDKMAN"
-        if [ -n "$SDKMAN" ]; then
-          yes | $SDKMAN --licenses 2>/dev/null || true
-          # 直接强制安装 build-tools 37（Buildozer 硬要的）
-          yes | $SDKMAN "build-tools;37.0.0" 2>&1 | tail -20 || true
-          # 确保 aidl 真在那里
-          ls -la $HOME/.buildozer/android/platform/android-sdk/build-tools/ 2>/dev/null || echo "NO build-tools dir!"
-        fi
-
-        # 第 3 轮：正式构建
         buildozer android debug 2>&1 | tail -200
 
         echo ""
         echo "=== 查找 APK ==="
-        find . -name "*.apk" -type f 2>/dev/null
+        find $HOME -name "*.apk" -type f 2>/dev/null
         ls -la bin/ 2>/dev/null || echo "(bin 目录不存在)"
 
     - name: 上传 APK
