@@ -36,44 +36,58 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: 安装 Buildozer
+    - name: 安装 Buildozer + Cython
       run: |
         pip install --upgrade pip setuptools wheel
-        pip install buildozer cython
+        pip install buildozer==1.5.0 cython==3.0.11
 
-    - name: 下载 Android SDK
+    - name: 预装 Android SDK + 接受 License
       run: |
-        ANDROID_HOME=$HOME/Android/Sdk
+        export ANDROID_HOME=$HOME/Android/Sdk
         mkdir -p $ANDROID_HOME/cmdline-tools
         cd /tmp
         wget -q https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip
         unzip -q commandlinetools-linux-10406996_latest.zip -d $ANDROID_HOME/cmdline-tools
         mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
-
-        export ANDROID_HOME=$ANDROID_HOME
         export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
 
-        yes | sdkmanager --licenses > /dev/null 2>&1 || true
-        sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2" \
-                   "ndk;25.2.9519653" > /dev/null 2>&1 || true
+        # 接受所有 license（同时兼容旧版和新版 license 格式）
+        yes | sdkmanager --licenses || true
+
+        # 装 Buildozer buildozer.spec 指定的 API 33 + 对应的 build-tools
+        sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2" "ndk;25.2.9519653"
 
         echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
-        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+        echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
         echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+        echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
 
     - name: Buildozer 构建 APK
       working-directory: quicksend
       run: |
         export ANDROID_HOME=$HOME/Android/Sdk
+        export ANDROID_SDK_ROOT=$ANDROID_HOME
         export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
         export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
         export JAVA_HOME=$JAVA_HOME
 
-        buildozer android debug 2>&1 | tail -150
+        # 清理旧缓存
+        rm -rf ~/.buildozer
+
+        # 构建
+        buildozer android debug 2>&1 | tail -300
+
+        echo ""
+        echo "=== 查找 APK ==="
+        find . -name "*.apk" -type f 2>/dev/null
+        ls -la bin/ 2>/dev/null || echo "(bin 目录不存在)"
 
     - name: 上传 APK
       uses: actions/upload-artifact@v4
       with:
         name: QuickSend-APK
-        path: quicksend/bin/*.apk
+        path: |
+          quicksend/bin/*.apk
+          bin/*.apk
+          .buildozer/android/platform/build/**/*.apk
         if-no-files-found: error
