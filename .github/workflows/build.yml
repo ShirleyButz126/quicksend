@@ -70,9 +70,19 @@ jobs:
         # 装 Build-Tools 37（Buildozer 1.5.0 硬要这个版本）
         yes | sdkmanager "build-tools;37.0.0" "platform-tools" "platforms;android-33" "ndk;24.0.8215888" 2>&1 | tail -5
 
-        # 软链 Buildozer 期望的 NDK r28c → 我们的 r24（Kivy 2.3.0 兼容 NDK 24，不兼容 25+）
+        # ===== 关键软链：让 Buildozer 用我们准备好的 SDK/NDK =====
         mkdir -p ~/.buildozer/android/platform
+        rm -rf ~/.buildozer/android/platform/android-sdk 2>/dev/null || true
         rm -rf ~/.buildozer/android/platform/android-ndk-r28c 2>/dev/null || true
+
+        # SDK 软链（Buildozer 期望 ~/.buildozer/android/platform/android-sdk）
+        ln -sf $ANDROID_HOME ~/.buildozer/android/platform/android-sdk
+
+        # Buildozer 1.5.0 硬调用旧版 tools/bin/sdkmanager（新版 SDK 已在 cmdline-tools）
+        mkdir -p $ANDROID_HOME/tools/bin
+        ln -sf $ANDROID_HOME/cmdline-tools/latest/bin/* $ANDROID_HOME/tools/bin/ 2>/dev/null || true
+
+        # NDK 软链（Buildozer 想要 r28c，我们给它 r24）
         ln -sf $ANDROID_HOME/ndk/24.0.8215888 ~/.buildozer/android/platform/android-ndk-r28c
 
         echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
