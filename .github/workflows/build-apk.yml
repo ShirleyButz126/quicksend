@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,11 +26,16 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Show python
+        run: |
+          python3 --version
+          which python3.10
+
       - name: Unpack sources
         run: |
           mkdir -p src
-          unzip -o build-src.zip -d src
-          find src -maxdepth 2 -type d
+          unzip -o build-src2.zip -d src
+          find src -maxdepth 3 -type d
 
       - name: Build debug APK
         run: gradle -p src/android assembleDebug --no-daemon --stacktrace
