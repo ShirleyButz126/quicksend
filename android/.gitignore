@@ -1,0 +1,13 @@
+# Signing
+app/keystore.properties
+*.jks
+*.keystore
+
+# Android build
+/local.properties
+/.gradle
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties

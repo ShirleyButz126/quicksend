@@ -1,0 +1,116 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+// --- 加载 keystore 配置 ---
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("app/keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace 'com.quicksend.android'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.quicksend.android"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.8"
+
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    signingConfigs {
+        // debug 始终可用（Android 默认 debug keystore）
+        // release 条件定义：有 properties 文件才配
+        if (keystoreProperties['storeFile']) {
+            release {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+                storeType keystoreProperties['storeType'] ?: 'pkcs12'
+            }
+        }
+    }
+
+    sourceSets {
+        main {
+            // 后端 Flask 源码由 syncPythonSources 复制到构建目录，避免把 uploads 等体积内容打进 APK
+            python.srcDirs = ['src/main/python', layout.buildDirectory.dir('generated/qpython').get().asFile]
+            // 前端静态资源由 syncStaticAssets 同步到构建目录
+            assets.srcDirs += [layout.buildDirectory.dir('generated/qassets').get().asFile]
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // findByName 返回 null（安全），getByName 才会抛异常
+            def releaseSigning = signingConfigs.findByName('release')
+            if (releaseSigning != null) {
+                signingConfig = releaseSigning
+            }
+            // releaseSigning 为 null 时 Gradle 自动不签名（debug 默认签）
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        // 与 CI 上可用的 Python 3.10 保持一致（Chaquopy 要求构建用版本与目标版本相同）
+        version = "3.10"
+        buildPython "python3.10"
+        pip {
+            install 'flask==3.0.3'
+        }
+    }
+}
+
+def qassetsDir = layout.buildDirectory.dir('generated/qassets').get().asFile
+def qpythonDir = layout.buildDirectory.dir('generated/qpython').get().asFile
+
+tasks.register('syncStaticAssets', Sync) {
+    from('../../quicksend/static') {
+        include 'dist/**'
+        include 'fonts/**'
+        include 'favicon.ico'
+        include 'favicon.png'
+        include 'index.build.html'
+        include 'script.js'
+    }
+    into new File(qassetsDir, 'static')
+}
+
+tasks.register('syncPythonSources', Sync) {
+    from('../../quicksend') {
+        include 'app.py'
+        include 'analytics.py'
+    }
+    into qpythonDir
+}
+
+tasks.named('preBuild').configure {
+    dependsOn 'syncStaticAssets', 'syncPythonSources'
+}
+
+// 显式声明依赖，避免 Gradle 8 报 "uses this output without declaring a dependency"
+tasks.configureEach { t ->
+    if (t.name.startsWith('merge') && t.name.endsWith('PythonSources')) {
+        t.dependsOn 'syncPythonSources'
+    }
+    if (t.name.startsWith('merge') && t.name.endsWith('Assets')) {
+        t.dependsOn 'syncStaticAssets'
+    }
+}

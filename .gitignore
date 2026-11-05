@@ -62,3 +62,16 @@ quicksend/quicksend/__pycache__/
 quicksend/QuickSend/
 quicksend/uploads/
 
+# Android signing keys (NEVER commit these!)
+*.keystore
+*.jks
+keystore*.txt
+keystore.properties
+release-key.jks
+
+# Old build artifacts / helper scripts
+build-src2-new.zip
+build-src.zip
+_makezip.py
+debug_grep*.py
+
