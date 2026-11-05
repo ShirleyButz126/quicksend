@@ -37,8 +37,16 @@ try:
 except ImportError:
     secure_filename = None
 
-# --- 环境检测 ---
-IS_ANDROID = hasattr(sys, 'getandroidapilevel')
+# --- 环境检测（多重保障）---
+# Chaquopy (Android)：QUICKSEND_ANDROID=1 由 quicksend_android.py 注入
+# Pydroid：hasattr(sys, 'getandroidapilevel')
+# Termux：sys.platform.startswith('linux') + Android 特征
+IS_ANDROID = (
+    os.environ.get('QUICKSEND_ANDROID') == '1'
+    or hasattr(sys, 'getandroidapilevel')
+    or os.environ.get('ANDROID_ARGUMENT') is not None
+    or (sys.platform.startswith('linux') and os.environ.get('HOME', '').startswith('/data/'))
+)
 IS_HEADLESS = IS_ANDROID or (os.environ.get('HEADLESS', '').lower() in ('1', 'true', 'yes'))
 
 # Fix for Windows Registry MIME type issue
@@ -73,8 +81,17 @@ _DATA_ROOT = (_SYSTEM_DATA if _IS_FROZEN else _PROJECT_ROOT)
 
 import uuid
 
-# --- Android 数据目录优化 ---
-if IS_ANDROID:
+# --- Android 数据目录优化（优先读取 quicksend_android.py 注入的环境变量）---
+_env_data_root = os.environ.get('QUICKSEND_DATA_ROOT')
+if _env_data_root:
+    # Chaquopy 路径：Android Service 传入的应用私有目录
+    _DATA_ROOT = _env_data_root
+    try:
+        os.makedirs(_DATA_ROOT, exist_ok=True)
+    except Exception:
+        pass
+    log(f'[Android] 环境变量数据根目录: {_DATA_ROOT}')
+elif IS_ANDROID:
     # Pydroid 上优先用外部存储（如果有），fallback 到应用私有目录
     _android_home = os.environ.get('HOME') or os.path.expanduser('~')
     _candidates = [
@@ -132,11 +149,20 @@ if not UPLOAD_FOLDER:
 
 TRANSFER_MODE = _config.get('mode', 'share') # share | oneway
 
-STATIC_FOLDER = os.path.join(BASE_DIR, 'static')
+STATIC_FOLDER = os.environ.get('QUICKSEND_STATIC_DIR') or os.path.join(BASE_DIR, 'static')
 
-# Create directories if they don't exist
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+# --- 确保关键目录存在 ---
+for _d in [UPLOAD_FOLDER]:
+    try:
+        if not os.path.exists(_d):
+            os.makedirs(_d, exist_ok=True)
+    except Exception as _e:
+        log(f'[警告] 创建目录失败 {_d}: {_e}')
+
+# 确保 STATIC_FOLDER 存在（如果是环境变量指定的外部路径）
+if not os.path.exists(STATIC_FOLDER):
+    # Chaquopy 下 apk 打包的 static 应该从 assets 解压到这里
+    log(f'[警告] STATIC_FOLDER 不存在: {STATIC_FOLDER}')
 
 app = Flask(__name__, static_folder=STATIC_FOLDER, template_folder=STATIC_FOLDER)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
