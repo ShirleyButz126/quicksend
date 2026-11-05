@@ -9,7 +9,8 @@ version = 1.0.3
 # === 源码 ===
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,atlas,json,html,js,css,ico,svg,woff2,woff,ttf,otf
-source.exclude_dirs = .git, __pycache__, node_modules, build, dist, uploads, QuickSend, _internal
+source.exclude_dirs = .git, __pycache__, node_modules, uploads, QuickSend, _internal
+# 注意：不去掉 build/dist —— 避免把 static/dist（前端编译产物）也排除了
 source.exclude_patterns = *.spec,*.bat,*.sh,*.md,*.ps1,*.txt,*.log
 
 # === APK 入口和依赖 ===

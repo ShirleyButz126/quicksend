@@ -1,4 +1,4 @@
-name: Build APK
+name: Build APK (Buildozer)
 
 on:
   push:
@@ -11,12 +11,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    # 顶层 env 让 secrets 稳定传递到所有 step
     env:
-      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+      JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_NDK_HOME: ${{ github.workspace }}/android-sdk/ndk-bundle
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,74 +26,80 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            build-essential git python3-pip python3-dev zip unzip \
+            openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev \
+            libncurses5-dev libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev \
+            libsdl2-mixer-dev libgl-dev libglu1-mesa-dev libgles2-mesa-dev \
+            x11proto-core-dev xauth xvfb cmake || echo "some deps skipped"
+
+      - name: Install buildozer + cython
+        run: |
+          pip3 install --upgrade pip
+          pip3 install buildozer cython
+          buildozer version
+
+      - name: Cache Android SDK
+        uses: actions/cache@v4
         with:
-          gradle-version: '8.9'
+          path: ${{ env.ANDROID_HOME }}
+          key: android-sdk-v1-${{ runner.os }}
 
-      - name: Show python
-        run: |
-          python3 --version
-          which python3.10
+      - name: Cache buildozer build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer/android
+            ~/.buildozer/cache
+            ~/.buildozer/downloads
+          key: buildozer-v1-${{ runner.os }}
 
-      - name: Unpack sources
+      - name: Accept Android licenses
         run: |
-          mkdir -p src
-          unzip -o build-src2.zip -d src
-          find src -maxdepth 3 -type d
+          mkdir -p $ANDROID_HOME/licenses
+          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > $ANDROID_HOME/licenses/android-sdk-license
+          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > $ANDROID_HOME/licenses/android-sdk-preview-license
 
-      # --- Release keystore 注入 ---
-      # 无条件跑，但脚本内判断 RELEASE_KEYSTORE_BASE64 是否为空
-      - name: Inject release keystore
+      - name: Build APK with buildozer
         run: |
-          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
-            mkdir -p src/android/app
-            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > src/android/app/release-key.jks
-            printf 'storeFile=release-key.jks\nstoreType=pkcs12\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-              "$RELEASE_STORE_PASSWORD" "$RELEASE_KEY_ALIAS" "$RELEASE_KEY_PASSWORD" \
-              > src/android/app/keystore.properties
-            ls -la src/android/app/release-key.jks src/android/app/keystore.properties
-            echo "Keystore injected OK"
+          cd quicksend
+          # yes 自动接受首次初始化的确认提示
+          # xvfb-run 提供虚拟 X display（Kivy 在后台也需要）
+          timeout 600 bash -c "yes | xvfb-run -a buildozer android debug --verbose" || echo "buildozer timed out or failed"
+
+      - name: Locate APK
+        id: locate
+        run: |
+          # buildozer 产物路径（多架构时会有多个 build-* 目录）
+          RESULT=$(find ~/.buildozer -name '*.apk' -type f 2>/dev/null | head -1)
+          echo "APK found: $RESULT"
+          if [ -n "$RESULT" ]; then
+            echo "apk_path=$RESULT" >> $GITHUB_OUTPUT
           else
-            echo "RELEASE_KEYSTORE_BASE64 is empty, skipping release signing"
+            echo "ERROR: no APK found"
+            find ~/.buildozer -type d 2>/dev/null | head -30
+            ls -la ~/.buildozer/ 2>/dev/null
           fi
 
-      # --- Debug 构建（始终跑） ---
-      - name: Build debug APK
-        run: gradle -p src/android assembleDebug --no-daemon --stacktrace
-
-      - name: Upload debug APK artifact
+      - name: Upload APK artifact
+        if: steps.locate.outputs.apk_path != ''
         uses: actions/upload-artifact@v4
         with:
           name: quicksend-debug-apk
-          path: src/android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          path: ${{ steps.locate.outputs.apk_path }}
 
-      # --- Release 构建（用 env 变量判断更可靠） ---
-      - name: Build release APK
-        if: env.RELEASE_KEYSTORE_BASE64 != ''
-        run: gradle -p src/android assembleRelease --no-daemon --stacktrace
-
-      - name: Upload release APK artifact
-        if: env.RELEASE_KEYSTORE_BASE64 != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: quicksend-release-apk
-          path: src/android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-
-      # --- 发布到 Release ---
-      - name: Publish APK to release
+      - name: Publish to Release
+        if: steps.locate.outputs.apk_path != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-${{ github.run_number }}
-          name: QuickSend APK ${{ github.run_number }}
-          files: |
-            src/android/app/build/outputs/apk/debug/*.apk
-            src/android/app/build/outputs/apk/release/*.apk
+          name: QuickSend APK ${{ github.run_number }} (Buildozer)
+          files: ${{ steps.locate.outputs.apk_path }}
           body: |
-            **Debug APK**: 可直接装到测试手机
-            **Release APK**: 正式签名（如果已配置 keystore）
+            **构建方式**: buildozer + python-for-android + Kivy（老方案，已验证能跑）
             
-            构建分支: ${{ github.head_ref }}
+            分支: ${{ github.head_ref }}
             Commit: ${{ github.sha }}
