@@ -50,17 +50,13 @@ jobs:
           if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
             mkdir -p src/android/app
             echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > src/android/app/release-key.jks
-            cat > src/android/app/keystore.properties <<EOF
-storeFile=release-key.jks
-storeType=pkcs12
-storePassword=$RELEASE_STORE_PASSWORD
-keyAlias=$RELEASE_KEY_ALIAS
-keyPassword=$RELEASE_KEY_PASSWORD
-EOF
+            printf 'storeFile=release-key.jks\nstoreType=pkcs12\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+              "$RELEASE_STORE_PASSWORD" "$RELEASE_KEY_ALIAS" "$RELEASE_KEY_PASSWORD" \
+              > src/android/app/keystore.properties
             ls -la src/android/app/release-key.jks src/android/app/keystore.properties
-            echo "Keystore injected ✅"
+            echo "Keystore injected OK"
           else
-            echo "RELEASE_KEYSTORE_BASE64 is empty, skipping release signing ℹ️"
+            echo "RELEASE_KEYSTORE_BASE64 is empty, skipping release signing"
           fi
 
       # --- Debug 构建（始终跑） ---
