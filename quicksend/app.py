@@ -37,8 +37,16 @@ try:
 except ImportError:
     secure_filename = None
 
-# --- 环境检测 ---
-IS_ANDROID = hasattr(sys, 'getandroidapilevel')
+# --- 环境检测（多重保障）---
+# Chaquopy (Android)：QUICKSEND_ANDROID=1 由 quicksend_android.py 注入
+# Pydroid：hasattr(sys, 'getandroidapilevel')
+# Termux：sys.platform.startswith('linux') + Android 特征
+IS_ANDROID = (
+    os.environ.get('QUICKSEND_ANDROID') == '1'
+    or hasattr(sys, 'getandroidapilevel')
+    or os.environ.get('ANDROID_ARGUMENT') is not None
+    or (sys.platform.startswith('linux') and os.environ.get('HOME', '').startswith('/data/'))
+)
 IS_HEADLESS = IS_ANDROID or (os.environ.get('HEADLESS', '').lower() in ('1', 'true', 'yes'))
 
 # Fix for Windows Registry MIME type issue
@@ -73,8 +81,17 @@ _DATA_ROOT = (_SYSTEM_DATA if _IS_FROZEN else _PROJECT_ROOT)
 
 import uuid
 
-# --- Android 数据目录优化 ---
-if IS_ANDROID:
+# --- Android 数据目录优化（优先读取 quicksend_android.py 注入的环境变量）---
+_env_data_root = os.environ.get('QUICKSEND_DATA_ROOT')
+if _env_data_root:
+    # Chaquopy 路径：Android Service 传入的应用私有目录
+    _DATA_ROOT = _env_data_root
+    try:
+        os.makedirs(_DATA_ROOT, exist_ok=True)
+    except Exception:
+        pass
+    print(f'[Android] 环境变量数据根目录: {_DATA_ROOT}')
+elif IS_ANDROID:
     # Pydroid 上优先用外部存储（如果有），fallback 到应用私有目录
     _android_home = os.environ.get('HOME') or os.path.expanduser('~')
     _candidates = [
@@ -91,7 +108,7 @@ if IS_ANDROID:
             continue
     else:
         _DATA_ROOT = _SYSTEM_DATA
-    log(f'[Android] 数据根目录: {_DATA_ROOT}')
+    print(f'[Android] 数据根目录: {_DATA_ROOT}')
 
 CONFIG_FILE = os.path.join(_DATA_ROOT, 'config.json')
 METADATA_FILE = os.path.join(_DATA_ROOT, 'metadata.json')
@@ -132,11 +149,20 @@ if not UPLOAD_FOLDER:
 
 TRANSFER_MODE = _config.get('mode', 'share') # share | oneway
 
-STATIC_FOLDER = os.path.join(BASE_DIR, 'static')
+STATIC_FOLDER = os.environ.get('QUICKSEND_STATIC_DIR') or os.path.join(BASE_DIR, 'static')
 
-# Create directories if they don't exist
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+# --- 确保关键目录存在 ---
+for _d in [UPLOAD_FOLDER]:
+    try:
+        if not os.path.exists(_d):
+            os.makedirs(_d, exist_ok=True)
+    except Exception as _e:
+        print(f'[警告] 创建目录失败 {_d}: {_e}')
+
+# 确保 STATIC_FOLDER 存在（如果是环境变量指定的外部路径）
+if not os.path.exists(STATIC_FOLDER):
+    # Chaquopy 下 apk 打包的 static 应该从 assets 解压到这里
+    print(f'[警告] STATIC_FOLDER 不存在: {STATIC_FOLDER}')
 
 app = Flask(__name__, static_folder=STATIC_FOLDER, template_folder=STATIC_FOLDER)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -1445,6 +1471,11 @@ def delete_file_api(filename):
 
 @app.route('/download/<path:filename>')
 def download_file(filename):
+    from flask import make_response, send_from_directory
+    import mimetypes
+    from urllib.parse import quote
+    import base64
+
     if filename.lower() == os.path.basename(METADATA_FILE).lower():
         return jsonify({'error': 'protected'}), 403
     meta = load_metadata()
@@ -1456,9 +1487,36 @@ def download_file(filename):
         log(f'[下载] 收到密码: {bool(pwd)}')
         if not pwd or not _check_password_hash(password_hash, pwd):
             return jsonify({'error': 'password required'}), 403
-    
+
     is_preview = request.args.get('preview', '').lower() == 'true'
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=not is_preview)
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    if not os.path.isfile(filepath):
+        return jsonify({'error': 'not found'}), 404
+
+    # Guess MIME
+    mime, _ = mimetypes.guess_type(filename)
+    if not mime:
+        mime = 'application/octet-stream'
+    log(f'[下载] MIME: {mime}')
+
+    # Build Content-Disposition per RFC 6266
+    # ascii safe fallback (remove non-ASCII)
+    ascii_name = filename.encode('ascii', errors='replace').decode('ascii')
+    # UTF-8 base64 encoded for filename*
+    utf8_b64 = base64.urlsafe_b64encode(filename.encode('utf-8')).decode('ascii').rstrip('=')
+
+    if is_preview:
+        cd = f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_b64}'
+    else:
+        cd = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_b64}'
+
+    response = make_response(send_from_directory(
+        app.config['UPLOAD_FOLDER'], filename, as_attachment=False
+    ))
+    response.headers['Content-Type'] = mime
+    response.headers['Content-Disposition'] = cd
+    log(f'[下载] Content-Disposition: {cd[:100]}...')
+    return response
 
 # --- Office Preview Support (conversion and cache) ---
 CACHE_ROOT = os.path.join(_DATA_ROOT, 'QuickSend', 'cache')

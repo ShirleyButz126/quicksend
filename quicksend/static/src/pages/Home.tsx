@@ -2475,7 +2475,10 @@ const Home = () => {
   };
 
   const handleCopyLink = (file: FileItem) => {
-     const origin = window.location.origin;
+     // Prefer LAN ip from backend config (ipAddress), fallback to WebView origin
+     const origin = (ipAddress && ipAddress.startsWith('http'))
+       ? ipAddress
+       : (ipAddress ? `http://${ipAddress}` : window.location.origin);
      const downloadUrl = `/download/${encodeURIComponent(file.name)}`;
      let link = `${origin}${downloadUrl}`;
      

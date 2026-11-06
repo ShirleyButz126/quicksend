@@ -1,0 +1,22 @@
+{
+  "favicon.ico": {
+    "file": "assets/favicon-C_jurEyM.ico",
+    "src": "favicon.ico"
+  },
+  "favicon.png": {
+    "file": "assets/favicon-C_jurEyM.ico",
+    "src": "favicon.ico"
+  },
+  "index.html": {
+    "file": "assets/index-DsUArwd8.js",
+    "name": "index",
+    "src": "index.html",
+    "isEntry": true,
+    "css": [
+      "assets/index-C1gzMgnq.css"
+    ],
+    "assets": [
+      "assets/favicon-C_jurEyM.ico"
+    ]
+  }
+}

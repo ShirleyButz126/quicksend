@@ -4,3 +4,21 @@ DEBUG: No sessions found
 [Metadata] 已存在: D:\QuickSend-1.0.6\quicksend\quicksend\metadata.json
 DEBUG: Loading sessions from D:\QuickSend-1.0.6\quicksend\quicksend\sessions.json
 DEBUG: No sessions found
+[Metadata] 已存在: C:\Users\Administrator\Documents\quicksend\quicksend\metadata.json
+DEBUG: Loading sessions from C:\Users\Administrator\Documents\quicksend\quicksend\sessions.json
+DEBUG: No sessions found
+[网络] 防火墙端口开放: 5000
+[启动] 服务准备
+[启动] 耗时: 2778ms, 端口: 5000, Android: False
+[Metadata] 已存在: C:\Users\Administrator\Documents\quicksend\quicksend\metadata.json
+DEBUG: Loading sessions from C:\Users\Administrator\Documents\quicksend\quicksend\sessions.json
+DEBUG: No sessions found
+[网络] 防火墙端口开放: 5000
+[启动] 服务准备
+[启动] 耗时: 582ms, 端口: 5000, Android: False
+[Metadata] 已存在: C:\Users\Administrator\Documents\quicksend\quicksend\metadata.json
+DEBUG: Loading sessions from C:\Users\Administrator\Documents\quicksend\quicksend\sessions.json
+DEBUG: No sessions found
+[Metadata] 已存在: C:\Users\Administrator\Documents\quicksend\quicksend\metadata.json
+DEBUG: Loading sessions from C:\Users\Administrator\Documents\quicksend\quicksend\sessions.json
+DEBUG: No sessions found
