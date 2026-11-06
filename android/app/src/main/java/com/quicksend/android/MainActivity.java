@@ -113,7 +113,16 @@ public class MainActivity extends Activity {
 
         CookieManager.getInstance().setAcceptCookie(true);
 
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                if (url != null && url.startsWith("quicksend://open")) {
+                    handleNativeOpen(url);
+                    return true;
+                }
+                return super.shouldOverrideUrlLoading(view, url);
+            }
+        });
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -324,6 +333,30 @@ public class MainActivity extends Activity {
             case "text/csv": return "csv";
             case "text/html": return "html";
             default: return null;
+        }
+    }
+
+    // --- 前端调用「打开」文件：quicksend://open?path=<encoded>&mime=<encoded> ---
+    private void handleNativeOpen(String url) {
+        try {
+            Uri uri = Uri.parse(url);
+            String path = uri.getQueryParameter("path");
+            String mime = uri.getQueryParameter("mime");
+            if (path == null || path.isEmpty()) {
+                Toast.makeText(this, "无效的打开请求", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            File file = new File(path);
+            if (!file.exists()) {
+                Toast.makeText(this, "文件不存在：" + path, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(Uri.fromFile(file), mime == null || mime.isEmpty() ? "*/*" : mime);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(Intent.createChooser(intent, "用其他应用打开"));
+        } catch (Exception e) {
+            Toast.makeText(this, "打开失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
