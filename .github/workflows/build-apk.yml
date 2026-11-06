@@ -11,12 +11,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    # 顶层 env 让 secrets 稳定传递到所有 step
-    env:
-      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,60 +37,19 @@ jobs:
           unzip -o build-src2.zip -d src
           find src -maxdepth 3 -type d
 
-      # --- Release keystore 注入（脚本内判断空值） ---
-      - name: Inject release keystore
-        run: |
-          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
-            mkdir -p src/android/app
-            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > src/android/app/release-key.jks
-            cat > src/android/app/keystore.properties <<EOF
-storeFile=release-key.jks
-storeType=pkcs12
-storePassword=$RELEASE_STORE_PASSWORD
-keyAlias=$RELEASE_KEY_ALIAS
-keyPassword=$RELEASE_KEY_PASSWORD
-EOF
-            ls -la src/android/app/release-key.jks src/android/app/keystore.properties
-            echo "Keystore injected OK"
-          else
-            echo "RELEASE_KEYSTORE_BASE64 is empty, skipping release signing"
-          fi
-
-      # --- Debug 构建（始终跑） ---
       - name: Build debug APK
         run: gradle -p src/android assembleDebug --no-daemon --stacktrace
 
-      - name: Upload debug APK artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: quicksend-debug-apk
+          name: quicksend-apk
           path: src/android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      # --- Release 构建（用 env 变量判断更可靠） ---
-      - name: Build release APK
-        if: env.RELEASE_KEYSTORE_BASE64 != ''
-        run: gradle -p src/android assembleRelease --no-daemon --stacktrace
-
-      - name: Upload release APK artifact
-        if: env.RELEASE_KEYSTORE_BASE64 != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: quicksend-release-apk
-          path: src/android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-
-      # --- 发布到 Release ---
       - name: Publish APK to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-${{ github.run_number }}
           name: QuickSend APK ${{ github.run_number }}
-          files: |
-            src/android/app/build/outputs/apk/debug/*.apk
-            src/android/app/build/outputs/apk/release/*.apk
-          body: |
-            **Build type**: debug + release (fixed signing)
-
-            Branch: ${{ github.head_ref }}
-            Commit: ${{ github.sha }}
+          files: src/android/app/build/outputs/apk/debug/*.apk
