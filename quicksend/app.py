@@ -953,7 +953,25 @@ def api_open():
         return jsonify({'error': 'not found'}), 404
         
     try:
-        if sys.platform == 'darwin':
+        if IS_ANDROID:
+            # Android: 用 am start 调 Intent.ACTION_VIEW
+            import subprocess as _sp
+            import mimetypes as _mt
+            mime, _ = _mt.guess_type(target)
+            if not mime:
+                mime = '*/*'
+            # 构造 file:// URI
+            from urllib.parse import quote as _q
+            file_uri = 'file://' + _q(target, safe='/:')
+            try:
+                _sp.call(['am', 'start', '-a', 'android.intent.action.VIEW',
+                          '-d', file_uri, '-t', mime],
+                         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=5)
+                return jsonify({'message': 'opened', 'platform': 'android'})
+            except Exception as e:
+                # am 不可用时，返回路径让 Android 壳处理
+                return jsonify({'message': 'need_native_open', 'path': target, 'mime': mime})
+        elif sys.platform == 'darwin':
             cmd = ['open']
             if reveal:
                 cmd.append('-R')
