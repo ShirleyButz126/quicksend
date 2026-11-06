@@ -800,7 +800,8 @@ const FileCard = ({
   isLoggedIn: boolean;
 }) => {
   const { showToast } = useToast();
-  const isOwner = isLoggedIn && file.uploader === currentUser;
+  // isHost (本机) 始终有权限，不强制要求上传者匹配
+  const isOwner = isHost || (isLoggedIn && file.uploader === currentUser);
   
   const handlePreview = () => {
     // We still need password for preview, but we can let App handle it if we pass just the file
@@ -819,11 +820,22 @@ const FileCard = ({
 
   const handleOpen = async () => {
     try {
-      await fetch('/api/open', {
+      const res = await fetch('/api/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.name, reveal: true })
       });
+      const data = await res.json().catch(() => ({}));
+      if (data.message === 'need_native_open' && data.path) {
+        // Android 壳拦截：用自定义 scheme 触发 Intent
+        const mime = encodeURIComponent(data.mime || '*/*');
+        const p = encodeURIComponent(data.path);
+        window.location.href = `quicksend://open?path=${p}&mime=${mime}`;
+      } else if (res.ok) {
+        showToast('已打开', 'success');
+      } else {
+        showToast('打开失败', 'error');
+      }
     } catch (e) {
       showToast('打开失败', 'error');
     }
@@ -1679,7 +1691,7 @@ const PreviewModal = ({
             .then(ab => {
                console.log('XLSX Preview: Bytes', ab.byteLength);
                try {
-                   const wb = XLSX.read(ab, {type: 'array'});
+                   const wb = XLSX.read(new Uint8Array(ab), {type: 'array'});
                    const wsname = wb.SheetNames[0];
                    const ws = wb.Sheets[wsname];
                    const html = XLSX.utils.sheet_to_html(ws);
@@ -2475,10 +2487,22 @@ const Home = () => {
   };
 
   const handleCopyLink = (file: FileItem) => {
-     // Prefer LAN ip from backend config (ipAddress), fallback to WebView origin
-     const origin = (ipAddress && ipAddress.startsWith('http'))
-       ? ipAddress
-       : (ipAddress ? `http://${ipAddress}` : window.location.origin);
+     // 最保险：直接用 config 拼 origin（后端一定返回 LAN IP + 端口）
+     let origin: string;
+     const wl = typeof window !== 'undefined' ? window.location : null;
+     const isLoopback = wl && ['localhost', '127.0.0.1', '::1'].includes(wl.hostname);
+
+     if (config && config.ip) {
+       const proto = (config as any).proto ? `${(config as any).proto}:` : 'http:';
+       const port = config.port || 5000;
+       origin = `${proto}//${config.ip}:${port}`;
+     } else if (wl) {
+       origin = `${wl.protocol}//${wl.hostname}${wl.port ? ':' + wl.port : ''}`;
+     } else {
+       origin = 'http://127.0.0.1:5000';
+     }
+     console.log('[CopyLink] origin=', origin, 'file=', file.name);
+
      const downloadUrl = `/download/${encodeURIComponent(file.name)}`;
      let link = `${origin}${downloadUrl}`;
      
@@ -2490,10 +2514,12 @@ const Home = () => {
          isPassword: true,
          onConfirm: (pwd) => {
             link += `?password=${encodeURIComponent(pwd)}`;
+            console.log('[CopyLink] final=', link);
             safeCopyText(link).then(() => showToast('链接已复制到剪贴板', 'success'));
          }
        });
      } else {
+       console.log('[CopyLink] final=', link);
        safeCopyText(link).then(() => showToast('链接已复制到剪贴板', 'success'));
      }
   };
