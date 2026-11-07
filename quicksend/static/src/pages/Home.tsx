@@ -1656,34 +1656,41 @@ const PreviewModal = ({
             .then(res => res.blob())
             .then(blob => {
                console.log('DOCX Preview: Blob size', blob.size);
-               if (containerRef.current) {
-                  // Ensure container is visible
-                  containerRef.current.style.display = 'block';
-                  
-                  renderAsync(blob, containerRef.current, containerRef.current, {
-                      className: "docx-wrapper",
-                      inWrapper: true,
-                      ignoreWidth: false,
-                      ignoreHeight: false,
-                      ignoreFonts: false,
-                      breakPages: true,
-                      ignoreLastRenderedPageBreak: true,
-                      experimental: false,
-                      trimXmlDeclaration: true,
-                      useBase64URL: false,
-                      debug: true,
-                  })
-                  .then(() => {
-                      console.log('DOCX Render Success');
-                      setLoading(false);
-                  })
-                  .catch(e => {
-                      console.error('DOCX Render Error', e);
-                      setError('预览失败: ' + e.message);
-                  });
-               }
+               // 等 DOM 挂载再渲染（React 竞态保护）
+               const doRender = () => {
+                 if (!containerRef.current) {
+                   requestAnimationFrame(doRender);
+                   return;
+                 }
+                 containerRef.current.style.display = 'block';
+                 containerRef.current.style.minHeight = '300px';
+                 
+                 renderAsync(blob, containerRef.current, containerRef.current, {
+                     className: "docx-wrapper",
+                     inWrapper: true,
+                     ignoreWidth: false,
+                     ignoreHeight: false,
+                     ignoreFonts: true,  // ← 关键：Android WebView 无法访问 Google Fonts CDN
+                     breakPages: true,
+                     ignoreLastRenderedPageBreak: true,
+                     experimental: false,
+                     trimXmlDeclaration: true,
+                     useBase64URL: false,
+                     debug: false,
+                 })
+                 .then(() => {
+                     console.log('DOCX Render Success');
+                     setLoading(false);
+                 })
+                 .catch(e => {
+                     console.error('DOCX Render Error', e);
+                     setError('预览失败: ' + e.message);
+                     setLoading(false);
+                 });
+               };
+               doRender();
             })
-            .catch(e => setError('加载失败: ' + e.message));
+            .catch(e => { setError('加载失败: ' + e.message); setLoading(false); });
       } else if (isXlsx && !isCsv) { // Excel
           setLoading(true);
           fetch(url)
@@ -1695,24 +1702,33 @@ const PreviewModal = ({
                    const wsname = wb.SheetNames[0];
                    const ws = wb.Sheets[wsname];
                    const html = XLSX.utils.sheet_to_html(ws);
-                   if (containerRef.current) {
-                       containerRef.current.innerHTML = html;
-                       // Add basic styles to the table
-                       const table = containerRef.current.querySelector('table');
-                       if (table) {
-                           table.className = "w-full border-collapse text-sm";
-                           table.querySelectorAll('td, th').forEach(el => {
-                               el.className = "border border-slate-300 px-2 py-1";
-                           });
-                       }
-                   }
+                   // 等 DOM 挂载再渲染
+                   const doRender = () => {
+                     if (!containerRef.current) {
+                       requestAnimationFrame(doRender);
+                       return;
+                     }
+                     containerRef.current.innerHTML = html;
+                     containerRef.current.style.minHeight = '200px';
+                     const table = containerRef.current.querySelector('table');
+                     if (table) {
+                         table.className = "w-full border-collapse text-sm";
+                         table.style.width = '100%';
+                         table.querySelectorAll('td, th').forEach(el => {
+                             el.className = "border border-slate-300 px-2 py-1";
+                         });
+                     }
+                     console.log('XLSX Render Success, HTML length:', html.length);
+                   };
+                   doRender();
                    setLoading(false);
                } catch (err: any) {
                    console.error('XLSX Render Error', err);
                    setError('Excel解析失败: ' + err.message);
+                   setLoading(false);
                }
             })
-            .catch(e => setError('加载失败: ' + e.message));
+            .catch(e => { setError('加载失败: ' + e.message); setLoading(false); });
       } else if (isCsv) {
           setLoading(true);
           fetch(url)
