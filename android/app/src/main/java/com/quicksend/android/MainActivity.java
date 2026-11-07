@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -27,6 +29,8 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.FileProvider;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
@@ -41,6 +45,7 @@ public class MainActivity extends Activity {
     private static final int REQ_NOTIFICATIONS = 1002;
     private static final int REQ_WRITE_STORAGE = 1003;
     private static final String DOWNLOAD_SUBDIR = "QuickSend";
+    private static final String FILEPROVIDER_AUTH = "com.quicksend.android.fileprovider";
 
     private WebView webView;
     private TextView splash;
@@ -107,11 +112,21 @@ public class MainActivity extends Activity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
-        settings.setAllowFileAccess(false);
+        settings.setAllowFileAccess(true);           // 允许 file:// 访问
+        settings.setAllowContentAccess(true);        // 允许 content:// 访问 (FileProvider 需要)
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setSupportMultipleWindows(false);
 
+        // 剪贴板相关：WebView 允许 execCommand('copy') 和 navigator.clipboard
+        if (Build.VERSION.SDK_INT >= 33) {
+            // Android 13+ 需要显式声明 clipboard 写入
+            webView.setWebViewClient(new WebViewClient() {
+                // 我们在下方单独设置 WebViewClient
+            });
+        }
+
         CookieManager.getInstance().setAcceptCookie(true);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -120,7 +135,39 @@ public class MainActivity extends Activity {
                     handleNativeOpen(url);
                     return true;
                 }
-                return super.shouldOverrideUrlLoading(view, url);
+                return false;  // 返回 false 让 WebView 自己加载 http/https
+            }
+
+            // === 剪贴板桥接：WebView JS 调 prompt() 时走这里 ===
+            @Override
+            public boolean onJsPrompt(WebView view, String url, String message,
+                                       String defaultValue, android.webkit.JsPromptResult result) {
+                // 自定义协议：quicksend://clipboard?set=xxx
+                if (message != null && message.startsWith("quicksend://clipboard")) {
+                    try {
+                        int q = message.indexOf('?');
+                        if (q >= 0) {
+                            String params = message.substring(q + 1);
+                            String[] pairs = params.split("&");
+                            for (String pair : pairs) {
+                                int eq = pair.indexOf('=');
+                                if (eq > 0) {
+                                    String k = pair.substring(0, eq);
+                                    String v = java.net.URLDecoder.decode(pair.substring(eq + 1), "UTF-8");
+                                    if ("set".equals(k)) {
+                                        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                                        if (cm != null) {
+                                            cm.setPrimaryClip(ClipData.newPlainText("QuickSend", v));
+                                            result.confirm("ok");
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) { }
+                }
+                return super.onJsPrompt(view, url, message, defaultValue, result);
             }
         });
 
@@ -151,19 +198,16 @@ public class MainActivity extends Activity {
         webView.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
             String name = extractFileName(url, contentDisposition);
             if (name == null || name.isEmpty()) {
-                // 兜底：URL 最后一段，或时间戳
                 try {
                     String path = Uri.parse(url).getPath();
                     int last = path.lastIndexOf('/');
                     name = last >= 0 ? path.substring(last + 1) : path;
                     name = java.net.URLDecoder.decode(name, "UTF-8");
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) { }
                 if (name == null || name.isEmpty()) {
                     name = "quicksend-download-" + System.currentTimeMillis();
                 }
             }
-            // 绝对不允许 .bin 作为兜底扩展名
             if (name.toLowerCase().endsWith(".bin") && url != null) {
                 try {
                     String path = Uri.parse(url).getPath();
@@ -172,17 +216,14 @@ public class MainActivity extends Activity {
                     urlName = java.net.URLDecoder.decode(urlName, "UTF-8");
                     int q = urlName.indexOf('?');
                     if (q >= 0) urlName = urlName.substring(0, q);
-                    // 如果 URL path 里有扩展名，用 URL 的名字
                     if (urlName.contains(".") && !urlName.toLowerCase().endsWith(".bin")) {
                         name = urlName;
                     } else {
-                        // 否则去掉 .bin，根据 mimetype 补扩展名
                         String noBin = name.substring(0, name.length() - 4);
                         String ext = extFromMime(mimetype);
                         name = ext != null ? noBin + "." + ext : noBin;
                     }
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) { }
             }
             if (Build.VERSION.SDK_INT < 29
                     && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
@@ -263,40 +304,30 @@ public class MainActivity extends Activity {
         }
     }
 
-    // --- 文件名提取：不从 Content-Disposition 退化成 .bin ---
     private static String extractFileName(String url, String contentDisposition) {
         if (contentDisposition != null && !contentDisposition.isEmpty()) {
-            // 1) 优先 RFC 6266 扩展：filename*=UTF-8''<base64>
             try {
-                String pattern = "(?i)filename\\*\\s*=\\s*UTF-8''([^;]+)";
-                java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(contentDisposition);
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                        "(?i)filename\\*\\s*=\\s*UTF-8''([^;]+)").matcher(contentDisposition);
                 if (m.find()) {
                     String b64 = m.group(1).trim();
-                    // URL 解码 filename* 里的 %XX
                     b64 = java.net.URLDecoder.decode(b64, "UTF-8");
                     byte[] decoded = android.util.Base64.decode(b64, android.util.Base64.URL_SAFE);
                     if (decoded != null && decoded.length > 0) {
                         return new String(decoded, "UTF-8");
                     }
                 }
-            } catch (Exception ignored) {
-            }
-
-            // 2) 普通 filename="xxx" 或 filename=xxx
+            } catch (Exception ignored) { }
             try {
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                        "(?i)filename\\s*=\\s*\"?([^\";]+)\"?"
-                ).matcher(contentDisposition);
+                        "(?i)filename\\s*=\\s*\"?([^\";]+)\"?").matcher(contentDisposition);
                 if (m.find()) {
                     String name = m.group(1).trim();
                     name = java.net.URLDecoder.decode(name, "UTF-8");
                     if (!name.isEmpty()) return name;
                 }
-            } catch (Exception ignored) {
-            }
+            } catch (Exception ignored) { }
         }
-
-        // 3) 从 URL path 提取
         if (url != null) {
             try {
                 String path = Uri.parse(url).getPath();
@@ -306,13 +337,11 @@ public class MainActivity extends Activity {
                 int q = name.indexOf('?');
                 if (q >= 0) name = name.substring(0, q);
                 if (!name.isEmpty()) return name;
-            } catch (Exception ignored) {
-            }
+            } catch (Exception ignored) { }
         }
         return null;
     }
 
-    // --- MIME → 扩展名（部分常见的补全） ---
     private static String extFromMime(String mime) {
         if (mime == null) return null;
         switch (mime.toLowerCase()) {
@@ -336,7 +365,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    // --- 前端调用「打开」文件：quicksend://open?path=<encoded>&mime=<encoded> ---
+    // === 前端调用「打开」文件：quicksend://open?path=<encoded>&mime=<encoded> ===
+    // 关键修复：用 FileProvider 替代 Uri.fromFile()，否则 Android 7+ 崩溃
     private void handleNativeOpen(String url) {
         try {
             Uri uri = Uri.parse(url);
@@ -351,9 +381,27 @@ public class MainActivity extends Activity {
                 Toast.makeText(this, "文件不存在：" + path, Toast.LENGTH_SHORT).show();
                 return;
             }
+
+            // === 核心修复：用 FileProvider 生成安全 URI ===
+            Uri fileUri;
+            try {
+                fileUri = FileProvider.getUriForFile(this, FILEPROVIDER_AUTH, file);
+            } catch (IllegalArgumentException e) {
+                // FileProvider 没配置这个路径，退而求其次用 Uri.fromFile (老设备兼容)
+                fileUri = Uri.fromFile(file);
+                Toast.makeText(this, "文件路径不在 FileProvider 白名单内，可能无法打开", Toast.LENGTH_SHORT).show();
+            }
+
             Intent intent = new Intent(Intent.ACTION_VIEW);
-            intent.setDataAndType(Uri.fromFile(file), mime == null || mime.isEmpty() ? "*/*" : mime);
+            intent.setDataAndType(fileUri, mime == null || mime.isEmpty() ? "*/*" : mime);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            // 给所有可能的包授予权限
+            List<ResolveInfo> resInfoList = getPackageManager().queryIntentActivities(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
+            for (android.content.pm.ResolveInfo resolveInfo : resInfoList) {
+                String packageName = resolveInfo.activityInfo.packageName;
+                grantUriPermission(packageName, fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            }
+
             startActivity(Intent.createChooser(intent, "用其他应用打开"));
         } catch (Exception e) {
             Toast.makeText(this, "打开失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
@@ -406,7 +454,6 @@ public class MainActivity extends Activity {
                 sb.append(line).append('\n');
             }
             br.close();
-            // 限制长度，避免 UI 太挤
             String full = sb.toString();
             return full.length() > 2000 ? full.substring(0, 2000) + "...(截断)" : full;
         } catch (Exception e) {
@@ -424,8 +471,7 @@ public class MainActivity extends Activity {
         } finally {
             try {
                 socket.close();
-            } catch (IOException ignored) {
-            }
+            } catch (IOException ignored) { }
         }
     }
 
@@ -486,8 +532,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         try {
             unregisterReceiver(downloadReceiver);
-        } catch (IllegalArgumentException ignored) {
-        }
+        } catch (IllegalArgumentException ignored) { }
         if (webView != null) {
             webView.destroy();
         }
