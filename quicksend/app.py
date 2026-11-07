@@ -1517,23 +1517,22 @@ def download_file(filename):
         mime = 'application/octet-stream'
     log(f'[下载] MIME: {mime}')
 
-    # Build Content-Disposition per RFC 6266
-    # ascii safe fallback (remove non-ASCII)
+    # Build Content-Disposition per RFC 6266 (filename* 必须是 URL percent-encoding！)
     ascii_name = filename.encode('ascii', errors='replace').decode('ascii')
-    # UTF-8 base64 encoded for filename*
-    utf8_b64 = base64.urlsafe_b64encode(filename.encode('utf-8')).decode('ascii').rstrip('=')
+    # 正确：filename*=UTF-8''<URL编码>  (不是 base64！)
+    utf8_pct = quote(filename, safe='')
 
     if is_preview:
-        cd = f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_b64}'
+        cd = f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_pct}'
     else:
-        cd = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_b64}'
+        cd = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_pct}'
 
     response = make_response(send_from_directory(
         app.config['UPLOAD_FOLDER'], filename, as_attachment=False
     ))
     response.headers['Content-Type'] = mime
     response.headers['Content-Disposition'] = cd
-    log(f'[下载] Content-Disposition: {cd[:100]}...')
+    log(f'[下载] Content-Disposition: {cd[:120]}...')
     return response
 
 # --- Office Preview Support (conversion and cache) ---
