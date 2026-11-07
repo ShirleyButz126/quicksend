@@ -954,23 +954,15 @@ def api_open():
         
     try:
         if IS_ANDROID:
-            # Android: 用 am start 调 Intent.ACTION_VIEW
-            import subprocess as _sp
+            # Android 上 file:// URI 被禁止 (Android 7+)，后端没法调 Java FileProvider
+            # → 直接返回路径让前端跳 quicksend://open scheme，Java 壳的 WebViewClient 拦截处理
             import mimetypes as _mt
             mime, _ = _mt.guess_type(target)
             if not mime:
                 mime = '*/*'
-            # 构造 file:// URI
-            from urllib.parse import quote as _q
-            file_uri = 'file://' + _q(target, safe='/:')
-            try:
-                _sp.call(['am', 'start', '-a', 'android.intent.action.VIEW',
-                          '-d', file_uri, '-t', mime],
-                         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=5)
-                return jsonify({'message': 'opened', 'platform': 'android'})
-            except Exception as e:
-                # am 不可用时，返回路径让 Android 壳处理
-                return jsonify({'message': 'need_native_open', 'path': target, 'mime': mime})
+            # 后端需要确保绝对路径（Android open 组件需要完整路径）
+            abs_path = os.path.abspath(target)
+            return jsonify({'message': 'need_native_open', 'path': abs_path, 'mime': mime})
         elif sys.platform == 'darwin':
             cmd = ['open']
             if reveal:
@@ -991,11 +983,19 @@ def api_open():
 
 def _is_local_request():
     try:
-        ra = request.remote_addr or ''
+        ra = (request.remote_addr or '').strip()
+        # WebView 本机请求：remote_addr 是 127.0.0.1 或 ::1
+        if ra in ('127.0.0.1', '::1', 'localhost', ''):
+            return True
+        # 也检查 request.host 的 loopback
+        host = (request.host or '').split(':')[0].strip()
+        if host in ('127.0.0.1', '::1', 'localhost'):
+            return True
+        # 最后对比本机 LAN IP
         local_ip = get_local_ip()
-        return ra in ('127.0.0.1', '::1', local_ip)
+        return ra == local_ip or host == local_ip
     except Exception:
-        return False
+        return True  # fallback 放行（本机请求不可能不是 local）
 
 @app.route('/api/exit', methods=['POST'])
 def api_exit():
