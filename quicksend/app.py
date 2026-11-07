@@ -983,19 +983,25 @@ def api_open():
 
 def _is_local_request():
     try:
+        # WebView 本机请求：MainActivity 会加 X-Requested-With: QuickSend header
+        xrw = (request.headers.get('X-Requested-With') or '').strip()
+        if xrw == 'QuickSend':
+            return True
         ra = (request.remote_addr or '').strip()
         # WebView 本机请求：remote_addr 是 127.0.0.1 或 ::1
-        if ra in ('127.0.0.1', '::1', 'localhost', ''):
+        if ra in ('127.0.0.1', '::1', 'localhost'):
             return True
         # 也检查 request.host 的 loopback
         host = (request.host or '').split(':')[0].strip()
         if host in ('127.0.0.1', '::1', 'localhost'):
             return True
         # 最后对比本机 LAN IP
-        local_ip = get_local_ip()
-        return ra == local_ip or host == local_ip
+        local_ip = get_local_ip_fast()
+        if local_ip and (ra == local_ip or host == local_ip):
+            return True
+        return False  # 其他设备 → 非 local
     except Exception:
-        return True  # fallback 放行（本机请求不可能不是 local）
+        return False  # fallback: 宁可不显示删除按钮也不要乱显示
 
 @app.route('/api/exit', methods=['POST'])
 def api_exit():
@@ -1517,15 +1523,17 @@ def download_file(filename):
         mime = 'application/octet-stream'
     log(f'[下载] MIME: {mime}')
 
-    # Build Content-Disposition per RFC 6266 (filename* 必须是 URL percent-encoding！)
-    ascii_name = filename.encode('ascii', errors='replace').decode('ascii')
-    # 正确：filename*=UTF-8''<URL编码>  (不是 base64！)
+    # Build Content-Disposition (RFC 6266)
+    # filename: UTF-8 直接编码（现代浏览器支持）
+    # filename*: RFC 5987 percent-encoding（老客户端 fallback）
+    # 注意：不能用 base64！必须是 URL percent-encoding
     utf8_pct = quote(filename, safe='')
 
     if is_preview:
-        cd = f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_pct}'
+        # PDF/图片 inline 预览，其他 inline 但 WebView 可能下载
+        cd = f'inline; filename="{filename}"; filename*=UTF-8\'\'{utf8_pct}'
     else:
-        cd = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_pct}'
+        cd = f'attachment; filename="{filename}"; filename*=UTF-8\'\'{utf8_pct}'
 
     response = make_response(send_from_directory(
         app.config['UPLOAD_FOLDER'], filename, as_attachment=False
