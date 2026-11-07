@@ -104,8 +104,9 @@
         navigator.clipboard.writeText = (text) => {
           try {
             const addr = window.__qs_addr__;
-            if (addr && /^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)/i.test(String(text || ''))) {
-              return orig(addr);
+            // 只替换 localhost/127.0.0.1/[::1] 为真实 LAN IP（保留后面的路径）
+            if (addr && typeof text === 'string' && /^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)/i.test(text)) {
+              text = text.replace(/^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)(:\d+)?/i, addr);
             }
           } catch {}
           return orig(text);
@@ -117,8 +118,15 @@
         try {
           const addr = window.__qs_addr__;
           if (addr && e && e.clipboardData) {
-            e.clipboardData.setData('text/plain', addr);
-            e.preventDefault();
+            // 只替换剪贴板里以 localhost/127.0.0.1/[::1] 开头的 URL
+            // 其他内容（选中的文字、完整的下载链接等）原样放行
+            const origText = (e.clipboardData.getData && e.clipboardData.getData('text/plain')) || '';
+            if (/^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)/i.test(origText)) {
+              const replaced = origText.replace(/^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?)(:\d+)?/i, addr);
+              e.clipboardData.setData('text/plain', replaced);
+              e.preventDefault();
+            }
+            // 非 localhost URL 或非 URL 文本 → 不做任何处理，让系统正常复制
           }
         } catch {}
       }, true);
