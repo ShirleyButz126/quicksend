@@ -3,13 +3,7 @@ plugins {
     id 'com.chaquo.python'
 }
 
-// --- 加载 keystore 配置 ---
-def keystoreProperties = new Properties()
-def keystorePropertiesFile = rootProject.file("app/keystore.properties")
-if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-}
-
+// --- FileProvider 需要 androidx.core ---
 android {
     namespace 'com.quicksend.android'
     compileSdk 34
@@ -76,6 +70,12 @@ chaquopy {
             install 'flask==3.0.3'
         }
     }
+}
+
+// androidx.core (FileProvider)
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.core:core-ktx:1.13.1'
 }
 
 def qassetsDir = layout.buildDirectory.dir('generated/qassets').get().asFile
