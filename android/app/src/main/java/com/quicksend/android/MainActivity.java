@@ -37,6 +37,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.List;
 
 public class MainActivity extends Activity {
 
@@ -117,14 +118,6 @@ public class MainActivity extends Activity {
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setSupportMultipleWindows(false);
 
-        // 剪贴板相关：WebView 允许 execCommand('copy') 和 navigator.clipboard
-        if (Build.VERSION.SDK_INT >= 33) {
-            // Android 13+ 需要显式声明 clipboard 写入
-            webView.setWebViewClient(new WebViewClient() {
-                // 我们在下方单独设置 WebViewClient
-            });
-        }
-
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
 
@@ -137,12 +130,13 @@ public class MainActivity extends Activity {
                 }
                 return false;  // 返回 false 让 WebView 自己加载 http/https
             }
+        });
 
+        webView.setWebChromeClient(new WebChromeClient() {
             // === 剪贴板桥接：WebView JS 调 prompt() 时走这里 ===
             @Override
             public boolean onJsPrompt(WebView view, String url, String message,
                                        String defaultValue, android.webkit.JsPromptResult result) {
-                // 自定义协议：quicksend://clipboard?set=xxx
                 if (message != null && message.startsWith("quicksend://clipboard")) {
                     try {
                         int q = message.indexOf('?');
@@ -169,9 +163,7 @@ public class MainActivity extends Activity {
                 }
                 return super.onJsPrompt(view, url, message, defaultValue, result);
             }
-        });
 
-        webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
                                              FileChooserParams params) {
