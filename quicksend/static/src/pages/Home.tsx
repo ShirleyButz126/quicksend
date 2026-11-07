@@ -1601,6 +1601,17 @@ const PreviewModal = ({
 
   useEffect(() => {
       if (!isOpen || !file) return;
+
+      // === 关键：取消/过期保护 ===
+      let didCancel = false;
+      const controller = new AbortController();
+      const signal = controller.signal;
+
+      const safeSet = <T,>(setter: (v: T) => void, val: T) => {
+        if (!didCancel) setter(val);
+      };
+
+      // 清理所有状态
       setContent(null);
       setZipFiles(null);
       setError(null);
@@ -1627,50 +1638,54 @@ const PreviewModal = ({
       const url = `/download/${encodeURIComponent(file.name)}?preview=true` + (password ? `&password=${encodeURIComponent(password)}` : '');
 
       if (isText && !isCsv) {
-          setLoading(true);
-          fetch(url)
-             .then(r => {
-                 if (r.ok) return r.text();
-                 throw new Error('Load failed');
-             })
-             .then(t => setContent(t))
-             .catch(e => setError(e.message))
-             .finally(() => setLoading(false));
+          safeSet(setLoading, true);
+          fetch(url, { signal })
+             .then(r => { if (r.ok) return r.text(); throw new Error('Load failed'); })
+             .then(t => safeSet(setContent, t))
+             .catch(e => { if (!didCancel) safeSet(setError, e.name === 'AbortError' ? '已取消' : e.message); })
+             .finally(() => { if (!didCancel) safeSet(setLoading, false); });
       } else if (isZip) {
-          setLoading(true);
-          fetch('/api/zip/list', {
-             method: 'POST',
-             headers: {'Content-Type': 'application/json'},
-             body: JSON.stringify({filename: file.name, password})
-          })
+          safeSet(setLoading, true);
+          fetch('/api/zip/list', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: file.name, password}), signal })
              .then(r => r.json())
-             .then(data => {
-                 if (data.error) throw new Error(data.error);
-                 setZipFiles(data.files);
-             })
-             .catch(e => setError(e.message))
-             .finally(() => setLoading(false));
+             .then(data => { if (data.error) throw new Error(data.error); safeSet(setZipFiles, data.files); })
+             .catch(e => { if (!didCancel) safeSet(setError, e.name === 'AbortError' ? '已取消' : e.message); })
+             .finally(() => { if (!didCancel) safeSet(setLoading, false); });
       } else if (isDocx) {
-          setLoading(true);
-          fetch(url)
+          safeSet(setLoading, true);
+          fetch(url, { signal })
             .then(res => res.blob())
             .then(blob => {
+               if (didCancel) return;
                console.log('DOCX Preview: Blob size', blob.size);
-               // 等 DOM 挂载再渲染（React 竞态保护）
+
+               // === DOCX 渲染 + 15秒超时保护 ===
+               let timedOut = false;
+               const timeoutId = setTimeout(() => {
+                 timedOut = true;
+                 if (!didCancel) {
+                   console.warn('DOCX renderAsync 超时');
+                   safeSet(setError, '预览加载超时，建议用「打开」按钮选择其他应用查看');
+                   safeSet(setLoading, false);
+                   if (containerRef.current) containerRef.current.innerHTML = '';
+                 }
+               }, 15000);
+
                const doRender = () => {
+                 if (didCancel || timedOut) return;
                  if (!containerRef.current) {
                    requestAnimationFrame(doRender);
                    return;
                  }
                  containerRef.current.style.display = 'block';
                  containerRef.current.style.minHeight = '300px';
-                 
+
                  renderAsync(blob, containerRef.current, containerRef.current, {
                      className: "docx-wrapper",
                      inWrapper: true,
                      ignoreWidth: false,
                      ignoreHeight: false,
-                     ignoreFonts: true,  // ← 关键：Android WebView 无法访问 Google Fonts CDN
+                     ignoreFonts: true,
                      breakPages: true,
                      ignoreLastRenderedPageBreak: true,
                      experimental: false,
@@ -1679,35 +1694,39 @@ const PreviewModal = ({
                      debug: false,
                  })
                  .then(() => {
-                     console.log('DOCX Render Success');
-                     setLoading(false);
+                     clearTimeout(timeoutId);
+                     if (!didCancel && !timedOut) {
+                       console.log('DOCX Render Success');
+                       safeSet(setLoading, false);
+                     }
                  })
                  .catch(e => {
+                     clearTimeout(timeoutId);
                      console.error('DOCX Render Error', e);
-                     setError('预览失败: ' + e.message);
-                     setLoading(false);
+                     if (!didCancel && !timedOut) {
+                       safeSet(setError, '预览失败: ' + e.message);
+                       safeSet(setLoading, false);
+                     }
                  });
                };
                doRender();
             })
-            .catch(e => { setError('加载失败: ' + e.message); setLoading(false); });
-      } else if (isXlsx && !isCsv) { // Excel
-          setLoading(true);
-          fetch(url)
+            .catch(e => { if (!didCancel) safeSet(setError, e.name === 'AbortError' ? '已取消' : e.message); safeSet(setLoading, false); });
+      } else if (isXlsx && !isCsv) {
+          safeSet(setLoading, true);
+          fetch(url, { signal })
             .then(res => res.arrayBuffer())
             .then(ab => {
+               if (didCancel) return;
                console.log('XLSX Preview: Bytes', ab.byteLength);
                try {
                    const wb = XLSX.read(new Uint8Array(ab), {type: 'array'});
                    const wsname = wb.SheetNames[0];
                    const ws = wb.Sheets[wsname];
                    const html = XLSX.utils.sheet_to_html(ws);
-                   // 等 DOM 挂载再渲染
                    const doRender = () => {
-                     if (!containerRef.current) {
-                       requestAnimationFrame(doRender);
-                       return;
-                     }
+                     if (didCancel) return;
+                     if (!containerRef.current) { requestAnimationFrame(doRender); return; }
                      containerRef.current.innerHTML = html;
                      containerRef.current.style.minHeight = '200px';
                      const table = containerRef.current.querySelector('table');
@@ -1721,46 +1740,47 @@ const PreviewModal = ({
                      console.log('XLSX Render Success, HTML length:', html.length);
                    };
                    doRender();
-                   setLoading(false);
+                   safeSet(setLoading, false);
                } catch (err: any) {
                    console.error('XLSX Render Error', err);
-                   setError('Excel解析失败: ' + err.message);
-                   setLoading(false);
+                   if (!didCancel) safeSet(setError, 'Excel解析失败: ' + err.message);
+                   safeSet(setLoading, false);
                }
             })
-            .catch(e => { setError('加载失败: ' + e.message); setLoading(false); });
+            .catch(e => { if (!didCancel) safeSet(setError, e.name === 'AbortError' ? '已取消' : e.message); safeSet(setLoading, false); });
       } else if (isCsv) {
-          setLoading(true);
-          fetch(url)
+          safeSet(setLoading, true);
+          fetch(url, { signal })
             .then(res => res.text())
             .then(text => {
+                if (didCancel) return;
                 Papa.parse(text, {
                     complete: (results) => {
+                        if (didCancel) return;
                         if (results.data && results.data.length > 0) {
-                            // Simple heuristic: assume first row is header if strings
                             const rows = results.data as string[][];
                             const headers = rows[0];
                             const dataRows = rows.slice(1);
-                            setCsvData({headers, rows: dataRows});
+                            safeSet(setCsvData, {headers, rows: dataRows});
                         } else {
-                            setError('CSV 文件为空');
+                            safeSet(setError, 'CSV 文件为空');
                         }
-                        setLoading(false);
+                        safeSet(setLoading, false);
                     },
                     error: (err) => {
-                        setError('CSV 解析失败: ' + err.message);
-                        setLoading(false);
+                        safeSet(setError, 'CSV 解析失败: ' + err.message);
+                        safeSet(setLoading, false);
                     }
                 });
         })
-            .catch(e => setError('加载失败: ' + e.message));
+            .catch(e => { if (!didCancel) safeSet(setError, e.name === 'AbortError' ? '已取消' : '加载失败: ' + e.message); safeSet(setLoading, false); });
       } else if (isBin || !isText && !isImage && !isVideo && !isAudio && !isPdf && !isZip && !isOffice) {
-          // Try Hex View for bin/multi or unknown files
-          setLoading(true);
-          fetch(url)
+          safeSet(setLoading, true);
+          fetch(url, { signal })
             .then(res => res.arrayBuffer())
             .then(buffer => {
-                const maxBytes = 4096; // Only read first 4KB
+                if (didCancel) return;
+                const maxBytes = 4096;
                 const view = new DataView(buffer.slice(0, maxBytes));
                 const rows = [];
                 for (let i = 0; i < view.byteLength; i += 16) {
@@ -1777,29 +1797,33 @@ const PreviewModal = ({
                         ascii: ascii.join('')
                     });
                 }
-                setHexData(rows);
-                setLoading(false);
+                safeSet(setHexData, rows);
+                safeSet(setLoading, false);
             })
-            .catch(e => setError('加载失败: ' + e.message));
+            .catch(e => { if (!didCancel) safeSet(setError, e.name === 'AbortError' ? '已取消' : '加载失败: ' + e.message); safeSet(setLoading, false); });
       }
 
       // Office (doc/ppt/pptx) via backend conversion
       if (isOffice && !isDocx && !isXlsx && !isCsv) {
-          setLoading(true);
-          fetch('/api/office/preview', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ filename: file.name, password })
-          })
+          safeSet(setLoading, true);
+          fetch('/api/office/preview', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ filename: file.name, password }), signal })
             .then(r => r.json())
             .then(info => {
+                if (didCancel) return;
                 if (info.error) throw new Error(info.error);
-                setExternalUrl(info.url);
-                setExternalType(info.type);
+                safeSet(setExternalUrl, info.url);
+                safeSet(setExternalType, info.type);
             })
-            .catch(e => setError('预览转换失败: ' + e.message))
-            .finally(() => setLoading(false));
+            .catch(e => { if (!didCancel) safeSet(setError, e.name === 'AbortError' ? '已取消' : '预览转换失败: ' + e.message); })
+            .finally(() => { if (!didCancel) safeSet(setLoading, false); });
       }
+
+      // === Effect cleanup ===
+      return () => {
+        didCancel = true;
+        controller.abort();
+        if (containerRef.current) containerRef.current.innerHTML = '';
+      };
 
   }, [isOpen, file, password]);
 
