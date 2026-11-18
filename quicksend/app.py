@@ -983,25 +983,25 @@ def api_open():
 
 def _is_local_request():
     try:
-        # WebView 本机请求：MainActivity 会加 X-Requested-With: QuickSend header
-        xrw = (request.headers.get('X-Requested-With') or '').strip()
-        if xrw == 'QuickSend':
-            return True
         ra = (request.remote_addr or '').strip()
-        # WebView 本机请求：remote_addr 是 127.0.0.1 或 ::1
+        host = (request.host or '').split(':')[0].strip()
+
+        # === 唯一可靠的本机判断：loopback ===
+        # remote_addr 是 loopback → Flask 收到本机请求
         if ra in ('127.0.0.1', '::1', 'localhost'):
             return True
-        # 也检查 request.host 的 loopback
-        host = (request.host or '').split(':')[0].strip()
+        # host 是 loopback → WebView 本机请求（loadUrl 用 127.0.0.1）
         if host in ('127.0.0.1', '::1', 'localhost'):
             return True
-        # 最后对比本机 LAN IP
-        local_ip = get_local_ip_fast()
-        if local_ip and (ra == local_ip or host == local_ip):
-            return True
-        return False  # 其他设备 → 非 local
+
+        # === 错误的！不能用 host 对比 local_ip ===
+        # 其他设备访问 http://服务器IP:5000 时 host 就是服务器IP → 永远命中
+        # local_ip = get_local_ip_fast()
+        # if local_ip and host == local_ip: return True  ← 删除！
+
+        return False  # 其他设备 → 一律非 local
     except Exception:
-        return False  # fallback: 宁可不显示删除按钮也不要乱显示
+        return False
 
 @app.route('/api/exit', methods=['POST'])
 def api_exit():
