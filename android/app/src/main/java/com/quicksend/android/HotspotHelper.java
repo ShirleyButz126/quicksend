@@ -11,7 +11,6 @@ import android.os.Build;
 import android.provider.Settings;
 import android.util.Log;
 
-import java.lang.reflect.Method;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -22,8 +21,8 @@ import java.util.Enumeration;
  * HotspotHelper: Manage Android WiFi hotspot for QuickSend (no-WiFi file transfer).
  *
  * Strategy:
- *   - Android 10+ (API 29+): startLocalOnlyHotspot() — no cellular data needed
- *   - Android 9- (API 24-28): jump to system hotspot settings page (can't programmatically enable without system privileges)
+ *   - Android 10+ (API 29+): startLocalOnlyHotspot() — local-only, no cellular data
+ *   - Android 9- (API 24-28): jump to system hotspot settings page
  */
 public class HotspotHelper {
 
@@ -34,6 +33,13 @@ public class HotspotHelper {
     private LocalOnlyHotspotReservation hotspotReservation;
     private volatile boolean starting = false;
 
+    // Static holder: MainActivity sets this in onCreate, HotspotHelper calls it on state change
+    public static volatile HotspotStateListener stateListener;
+
+    public interface HotspotStateListener {
+        void onHotspotStateChanged(String state, String lanIp);
+    }
+
     public HotspotHelper(Context ctx) {
         this.context = ctx.getApplicationContext();
         this.wifiManager = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
@@ -41,27 +47,33 @@ public class HotspotHelper {
 
     // === 对外 API ===
 
-    /** @return "ok" if started (or starting), "redirect://..." to jump to settings on old Android, or error message */
+    /** @return "ok", "starting", "redirect:<settings_action>", "error:..." or "permission_needed:..." */
     public synchronized String startHotspot() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            // Android 13+ needs NEARBY_WIFI_DEVICES runtime permission
-            if (context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
-                return "permission_needed:NEARBY_WIFI_DEVICES";
-            }
+        // Permission checks (runtime for Android 13+)
+        if (Build.VERSION.SDK_INT >= 33
+                && context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
+            return "permission_needed:NEARBY_WIFI_DEVICES";
         }
-        if (Build.VERSION.SDK_INT >= 10) {
+        // Location permission required for WiFi ops on Android 12 and below
+        if (Build.VERSION.SDK_INT >= 24 && Build.VERSION.SDK_INT < 33
+                && context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return "permission_needed:ACCESS_FINE_LOCATION";
+        }
+
+        if (Build.VERSION.SDK_INT >= 29) {
             return startLocalOnlyHotspot();
         } else {
-            // Old Android: jump to settings
+            // Android 9 and below: can't programmatically enable hotspot
             return "redirect:" + Settings.ACTION_WIFI_AP_SETTINGS;
         }
     }
 
     public synchronized String stopHotspot() {
-        if (Build.VERSION.SDK_INT >= 10 && hotspotReservation != null) {
+        if (Build.VERSION.SDK_INT >= 29 && hotspotReservation != null) {
             try {
                 hotspotReservation.close();
                 hotspotReservation = null;
+                notifyState("stopped");
                 return "ok";
             } catch (Exception e) {
                 Log.w(TAG, "stop failed: " + e.getMessage());
@@ -74,13 +86,12 @@ public class HotspotHelper {
 
     public synchronized boolean isStarting() { return starting; }
 
-    /** Best effort: find the LAN IP of the device's active hotspot/interface */
+    /** Find LAN IP of the active interface (hotspot or WiFi) */
     public String getLanIp() {
         try {
             Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
             for (NetworkInterface netint : Collections.list(nets)) {
                 if (!netint.isUp() || netint.isLoopback()) continue;
-                // Skip mobile data (rmnet) — we want wlan or rndis or tiwlan
                 String name = netint.getName();
                 if (name.startsWith("rmnet") || name.startsWith("ppp")) continue;
                 Enumeration<InetAddress> addrs = netint.getInetAddresses();
@@ -91,7 +102,7 @@ public class HotspotHelper {
                 }
             }
         } catch (Exception ignored) { }
-        // Fallback: WifiManager
+        // WifiManager fallback
         try {
             if (wifiManager != null && wifiManager.getConnectionInfo() != null) {
                 int ipInt = wifiManager.getConnectionInfo().getIpAddress();
@@ -115,7 +126,6 @@ public class HotspotHelper {
 
         starting = true;
         try {
-            // If WiFi is on, it may auto-disconnect when LocalOnlyHotspot starts. That's fine.
             wifiManager.startLocalOnlyHotspot(new LocalOnlyHotspotCallback() {
                 @Override
                 public void onStarted(LocalOnlyHotspotReservation reservation) {
@@ -123,8 +133,7 @@ public class HotspotHelper {
                     hotspotReservation = reservation;
                     starting = false;
                     Log.i(TAG, "LocalOnlyHotspot started");
-                    // Fire callback to JS bridge via MainActivity
-                    notifyHotspotState("started");
+                    notifyState("started");
                 }
 
                 @Override
@@ -133,7 +142,7 @@ public class HotspotHelper {
                     hotspotReservation = null;
                     starting = false;
                     Log.i(TAG, "LocalOnlyHotspot stopped");
-                    notifyHotspotState("stopped");
+                    notifyState("stopped");
                 }
 
                 @Override
@@ -143,18 +152,21 @@ public class HotspotHelper {
                     Log.w(TAG, "LocalOnlyHotspot failed: reason=" + reason);
                     String reasonText;
                     switch (reason) {
-                        case LocalOnlyHotspotCallback.ERROR_NO_CHANNEL: reasonText = "no_channel"; break;
-                        case LocalOnlyHotspotCallback.ERROR_REDIRECTION_NOT_ENABLED: reasonText = "redirection_not_enabled"; break;
-                        case LocalOnlyHotspotCallback.ERROR_SYSTEM_FEATURE_NOT_SUPPORTED: reasonText = "not_supported"; break;
-                        default: reasonText = "unknown(" + reason + ")";
+                        case LocalOnlyHotspotCallback.ERROR_NO_CHANNEL:
+                            reasonText = "no_channel"; break;
+                        case 1: // ERROR_REDIRECTION_NOT_ENABLED (API 30+, value=1)
+                            reasonText = "redirection_not_enabled"; break;
+                        case 2: // ERROR_SYSTEM_FEATURE_NOT_SUPPORTED (API 30+, value=2)
+                            reasonText = "not_supported"; break;
+                        default:
+                            reasonText = "unknown(" + reason + ")";
                     }
-                    notifyHotspotState("failed:" + reasonText);
+                    notifyState("failed:" + reasonText);
                 }
             }, null);
             return "starting";
         } catch (SecurityException e) {
             starting = false;
-            // This can happen if NEARBY_WIFI_DEVICES permission not granted on Android 13+
             Log.e(TAG, "startLocalOnlyHotspot SecurityException: " + e.getMessage());
             return "permission_needed:NEARBY_WIFI_DEVICES";
         } catch (Exception e) {
@@ -164,35 +176,21 @@ public class HotspotHelper {
         }
     }
 
-    // === Notify JS bridge (runs on main thread via runOnUiThread) ===
-
-    private void notifyHotspotState(final String state) {
-        // Find MainActivity via context
-        // MainActivity registers itself at setup
-        if (HotspotListener.instance != null) {
-            HotspotListener.instance.onHotspotStateChanged(state, getLanIp());
+    private void notifyState(String state) {
+        if (stateListener != null) {
+            stateListener.onHotspotStateChanged(state, getLanIp());
         }
     }
 
-    // === Listener interface (MainActivity implements this) ===
-    public interface HotspotListener {
-        void onHotspotStateChanged(String state, String lanIp);
-    }
+    // === Permission helpers ===
 
-    // Helper: static instance holder so HotspotHelper can notify MainActivity
-    public static class HotspotListener {
-        public static volatile HotspotListener instance;
-    }
-
-    // === Check if we should request NEARBY_WIFI_DEVICES on Android 13+ ===
     public boolean needsNearbyWifiPermission() {
         return Build.VERSION.SDK_INT >= 33
                 && context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED;
     }
 
-    // === Check if location permission (required for WiFi operations on Android 12 and below) ===
     public boolean needsLocationPermission() {
-        return Build.VERSION.SDK_INT >= 24
+        return Build.VERSION.SDK_INT >= 24 && Build.VERSION.SDK_INT < 33
                 && context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED;
     }
 }
