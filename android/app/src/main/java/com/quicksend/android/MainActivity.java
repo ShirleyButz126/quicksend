@@ -41,7 +41,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.List;
 
-public class MainActivity extends Activity implements HotspotHelper.HotspotListener {
+public class MainActivity extends Activity implements HotspotHelper.HotspotStateListener {
 
     private static final int PORT = 5000;
     private static final int REQ_FILE = 1001;
@@ -91,7 +91,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotListe
         setContentView(root);
 
         hotspotHelper = new HotspotHelper(this);
-        HotspotHelper.HotspotListener.instance = this;
+        HotspotHelper.stateListener = this;
 
         setupWebView();
 
