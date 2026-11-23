@@ -407,10 +407,13 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 default:
                     result = "error:unknown_action:" + action;
             }
-            // If result starts with "redirect:", open system settings page
-            if (result.startsWith("redirect:")) {
-                startActivity(new Intent(result.substring("redirect:".length())));
-                webView.evaluateJavascript("__quicksend.onHotspotResult({redirect:true})", null);
+            // Handle fallback → jump to system hotspot settings
+            if ("fallback".equals(result) || result.startsWith("error:")) {
+                String errMsg = "fallback".equals(result) ? "系统不支持自动开热点" : result.substring(6);
+                Log.w("QuickSend", "Hotspot start fallback, reason=" + errMsg);
+                startActivity(new Intent("android.settings.WIFI_AP_SETTINGS"));
+                webView.evaluateJavascript(
+                        "__quicksend.onHotspotResult({redirect:true, error:'" + errMsg.replace("'", "\\'") + "'})", null);
                 Toast.makeText(this, "请在系统设置中手动开启热点", Toast.LENGTH_LONG).show();
                 return;
             }
@@ -436,10 +439,21 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         } catch (Exception ignored) { }
     }
 
-    // === HotspotHelper.HotspotListener 回调 ===
+    // === HotspotHelper.HotspotStateListener 回调 ===
     @Override
     public void onHotspotStateChanged(final String state, final String lanIp) {
         runOnUiThread(() -> {
+            Log.i("QuickSend", "onHotspotStateChanged: state=" + state + " ip=" + lanIp);
+            if (state.startsWith("fallback")) {
+                // LocalOnlyHotspot failed → jump to system settings
+                Log.w("QuickSend", "Hotspot callback fallback: " + state);
+                try { startActivity(new Intent("android.settings.WIFI_AP_SETTINGS")); } catch (Exception ignored) {}
+                webView.evaluateJavascript(
+                        "__quicksend.onHotspotState({state:'" + state.replace("'", "\\'") + "', ip:'" + (lanIp != null ? lanIp : "") + "'})",
+                        null);
+                Toast.makeText(this, "系统不支持自动热点，请在设置中手动开启", Toast.LENGTH_LONG).show();
+                return;
+            }
             if (webView != null) {
                 webView.evaluateJavascript(
                         "__quicksend.onHotspotState({state:'" + state + "', ip:'" + (lanIp != null ? lanIp : "") + "'})",
