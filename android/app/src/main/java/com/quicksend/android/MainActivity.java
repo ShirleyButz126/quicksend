@@ -181,7 +181,9 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                Log.i("QuickSend", "WebView page finished: " + url + " title=" + view.getTitle());
+                String title = view.getTitle();
+                Log.i("QuickSend", "WebView page finished: " + url + " title=" + title);
+                Toast.makeText(MainActivity.this, "页面加载完成: " + (title != null ? title : "(无标题)"), Toast.LENGTH_SHORT).show();
             }
         });
 
@@ -559,6 +561,33 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             boolean finalReady = ready;
             runOnUiThread(() -> {
                 if (finalReady) {
+                    // === 诊断：Java HTTP 直接拉首页，看 Flask 返回什么 ===
+                    new Thread(() -> {
+                        try {
+                            java.net.HttpURLConnection c = (java.net.HttpURLConnection)
+                                    new java.net.URL("http://127.0.0.1:" + PORT + "/").openConnection();
+                            c.setConnectTimeout(3000);
+                            c.setReadTimeout(3000);
+                            c.setRequestMethod("GET");
+                            int code = c.getResponseCode();
+                            StringBuilder sb = new StringBuilder();
+                            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                                    new java.io.InputStreamReader(
+                                            code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(),
+                                            "UTF-8"))) {
+                                String line;
+                                while ((line = br.readLine()) != null && sb.length() < 800) {
+                                    sb.append(line).append('\n');
+                                }
+                            }
+                            Log.i("QuickSend", "HOME PAGE DIAGNOSTIC: HTTP " + code
+                                    + " len=" + sb.length()
+                                    + " head=" + sb.toString().replace("\n", " ").substring(0, Math.min(400, sb.length())));
+                        } catch (Exception e) {
+                            Log.e("QuickSend", "HOME PAGE DIAGNOSTIC FAILED: " + e.getMessage());
+                        }
+                    }, "quicksend-home-diag").start();
+
                     splash.setVisibility(View.GONE);
                     Toast.makeText(MainActivity.this, "服务就绪，加载页面…", Toast.LENGTH_SHORT).show();
                     // Inject build number into JS globals so frontend can display version
