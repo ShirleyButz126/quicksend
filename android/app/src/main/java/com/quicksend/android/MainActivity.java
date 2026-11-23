@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -616,16 +617,25 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             // If granted, retry startHotspot
             if (granted && hotspotHelper != null) {
                 String result = hotspotHelper.startHotspot();
-                if (!result.startsWith("redirect:")) {
+                // startHotspot returns: "starting"/"ok" → async OK
+                //   "fallback"/"error:xxx"/"permission_needed:xxx" → sync fail
+                if ("fallback".equals(result) || result.startsWith("error:") || result.startsWith("permission_needed:")) {
+                    String errMsg = "fallback".equals(result) ? "系统不支持自动开热点" : result;
+                    Log.w("QuickSend", "Hotspot retry sync fail: " + errMsg);
+                    try { startActivity(new Intent("android.settings.WIFI_AP_SETTINGS")); } catch (Exception ignored) {}
+                    if (webView != null) {
+                        webView.evaluateJavascript(
+                                "__quicksend.onHotspotState({state:'fallback:" + errMsg.replace("'", "\\'") + "'})", null);
+                    }
+                    Toast.makeText(this, "请在系统设置中手动开启热点", Toast.LENGTH_LONG).show();
+                } else {
+                    // "starting" or "ok" → 正常路径，等 LocalOnlyHotspot 回调
                     String lanIp = hotspotHelper.getLanIp();
                     if (webView != null) {
                         webView.evaluateJavascript(
                                 "__quicksend.onHotspotResult({ip:'" + (lanIp != null ? lanIp : "") + "', status:'" + result.replace("'", "\\'") + "'})",
                                 null);
                     }
-                } else {
-                    startActivity(new Intent(result.substring("redirect:".length())));
-                    Toast.makeText(this, "请在系统设置中手动开启热点", Toast.LENGTH_LONG).show();
                 }
             }
             return;

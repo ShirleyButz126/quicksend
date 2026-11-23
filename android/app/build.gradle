@@ -8,6 +8,11 @@ android {
     namespace 'com.quicksend.android'
     compileSdk 34
 
+    // AGP 8.x 要求显式开启 buildConfig 才能用 buildConfigField
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
         applicationId "com.quicksend.android"
         minSdk 24

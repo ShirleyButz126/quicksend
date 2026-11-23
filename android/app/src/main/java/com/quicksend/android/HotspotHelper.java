@@ -8,6 +8,8 @@ import android.net.wifi.WifiManager;
 import android.net.wifi.WifiManager.LocalOnlyHotspotCallback;
 import android.net.wifi.WifiManager.LocalOnlyHotspotReservation;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.net.Inet4Address;
@@ -175,6 +177,16 @@ public class HotspotHelper {
                 }
             }, null);
             Log.i(TAG, "startLocalOnlyHotspot() called — waiting for callback...");
+
+            // === 5 秒超时保护：某些设备 LOH 永远不回调 ===
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                if (starting) {
+                    Log.w(TAG, "LocalOnlyHotspot timeout (5s) — no callback received, forcing fallback");
+                    starting = false;
+                    notifyState("fallback:timeout");
+                }
+            }, 5000);
+
             return "starting";
         } catch (SecurityException e) {
             starting = false;

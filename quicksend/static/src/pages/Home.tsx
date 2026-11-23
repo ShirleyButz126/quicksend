@@ -531,6 +531,11 @@ const UserProfileCard = ({
           if (data?.state === 'started') { setHotspotStatus('running'); if (data?.ip) setHotspotIp(data.ip); }
           else if (data?.state === 'stopped') { setHotspotStatus('idle'); }
           else if (data?.state?.startsWith('failed')) { setHotspotStatus('failed'); setHotspotError(data.state); }
+          // fallback: LocalOnlyHotspot 不支持/失败 → 跳系统设置（Java 层已调 startActivity）
+          else if (data?.state?.startsWith('fallback')) {
+            setHotspotStatus('redirect');
+            setHotspotError('请在系统设置中手动开启热点');
+          }
         }
       };
     }
