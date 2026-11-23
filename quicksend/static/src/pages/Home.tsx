@@ -492,7 +492,9 @@ const UserProfileCard = ({
   onLogin,
   onLogout,
   isHost,
-  onOpenSettings
+  onOpenSettings,
+  version,
+  build
 }: {
   ipAddress: string | null,
   username: string,
@@ -500,7 +502,9 @@ const UserProfileCard = ({
   onLogin: () => void,
   onLogout: () => void,
   isHost?: boolean,
-  onOpenSettings?: () => void
+  onOpenSettings?: () => void,
+  version?: string,
+  build?: string
 }) => {
   const [copied, setCopied] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
@@ -583,11 +587,11 @@ const UserProfileCard = ({
           <div className="flex flex-col">
             <span className="font-bold text-slate-900 leading-tight">QuickSend</span>
             <span className="text-[10px] text-slate-400 leading-tight">
-              v{config?.version || '—'}
+              v{version || '—'}
               {(() => {
-                const build = (typeof window !== 'undefined') ? (window as any).__QUICKSEND_BUILD__ : null;
+                const injected = (typeof window !== 'undefined') ? (window as any).__QUICKSEND_BUILD__ : null;
+                if (injected) return ` · APK-${injected}`;
                 if (build) return ` · APK-${build}`;
-                if (config?.build) return ` · APK-${config.build}`;
                 return '';
               })()}
             </span>
@@ -2787,6 +2791,8 @@ const Home = () => {
               onLogout={handleLogout}
               isHost={isHost}
               onOpenSettings={() => setShowSettings(true)}
+              version={config?.version}
+              build={config?.build}
             />
 
             <div className="space-y-3">

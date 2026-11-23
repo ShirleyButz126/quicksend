@@ -16,6 +16,7 @@ export interface IpResponse {
   allow_remote_group_create?: boolean;
   use_source_date?: boolean;
   version?: string;
+  build?: string;
 }
 
 export interface TextItem {
