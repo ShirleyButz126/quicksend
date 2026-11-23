@@ -109,14 +109,24 @@ public class QuickSendService extends Service {
     }
 
     private void extractAssets(File dest) throws IOException {
-        File marker = new File(dest, ".extracted");
+        // 用版本号做 marker，每次构建都重新解压（避免覆盖安装时用旧资源）
+        int myBuild = BuildConfig.BUILD_NUMBER;
+        File marker = new File(dest, ".extracted_" + myBuild);
         if (marker.exists()) {
+            Log.i(TAG, "Assets already extracted for build " + myBuild);
             return;
         }
+        Log.i(TAG, "Extracting assets for build " + myBuild + " to " + dest);
         deleteRecursively(dest);
         dest.mkdirs();
         copyAsset("static", dest);
         marker.createNewFile();
+        // 清理旧版本 marker
+        try (java.io.File[] oldMarkers = dest.listFiles((d, name) -> name.startsWith(".extracted_") && !name.equals(marker.getName()))) {
+            if (oldMarkers != null) {
+                for (java.io.File m : oldMarkers) m.delete();
+            }
+        }
     }
 
     private void copyAsset(String assetPath, File dest) throws IOException {
