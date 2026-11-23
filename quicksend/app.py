@@ -168,7 +168,7 @@ app = Flask(__name__, static_folder=STATIC_FOLDER, template_folder=STATIC_FOLDER
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024  # 16GB max upload size
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-VERSION = "1.0.3"
+VERSION = "1.0.8"
 GLOBAL_PORT = 5000
 
 
@@ -873,7 +873,8 @@ def api_ip():
             'use_source_date': _config.get('use_source_date', False),
             'upload_dir': app.config['UPLOAD_FOLDER'],
             'allow_remote_group_create': _config.get('allow_remote_group_create', True),
-            'version': VERSION
+            'version': VERSION,
+            'build': request.headers.get('X-QuickSend-Build', '')
         })
     except Exception:
         return jsonify({
@@ -885,7 +886,8 @@ def api_ip():
             'use_source_date': _config.get('use_source_date', False),
             'upload_dir': app.config['UPLOAD_FOLDER'],
             'allow_remote_group_create': _config.get('allow_remote_group_create', True),
-            'version': VERSION
+            'version': VERSION,
+            'build': request.headers.get('X-QuickSend-Build', '')
         })
 
 @app.route('/api/config', methods=['POST'])
