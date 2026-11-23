@@ -8,7 +8,6 @@ import android.net.wifi.WifiManager;
 import android.net.wifi.WifiManager.LocalOnlyHotspotCallback;
 import android.net.wifi.WifiManager.LocalOnlyHotspotReservation;
 import android.os.Build;
-import android.provider.Settings;
 import android.util.Log;
 
 import java.net.Inet4Address;
@@ -21,8 +20,8 @@ import java.util.Enumeration;
  * HotspotHelper: Manage Android WiFi hotspot for QuickSend (no-WiFi file transfer).
  *
  * Strategy:
- *   - Android 10+ (API 29+): startLocalOnlyHotspot() — local-only, no cellular data
- *   - Android 9- (API 24-28): jump to system hotspot settings page
+ *   - Android 10+ (API 29+): startLocalOnlyHotspot() if supported
+ *   - Fallback: jump to system hotspot settings page
  */
 public class HotspotHelper {
 
@@ -33,7 +32,7 @@ public class HotspotHelper {
     private LocalOnlyHotspotReservation hotspotReservation;
     private volatile boolean starting = false;
 
-    // Static holder: MainActivity sets this in onCreate, HotspotHelper calls it on state change
+    // Static holder: MainActivity sets this in onCreate
     public static volatile HotspotStateListener stateListener;
 
     public interface HotspotStateListener {
@@ -47,26 +46,29 @@ public class HotspotHelper {
 
     // === 对外 API ===
 
-    /** @return "ok", "starting", "redirect:<settings_action>", "error:..." or "permission_needed:..." */
+    /** @return "ok", "starting", "fallback", "error:..." or "permission_needed:..." */
     public synchronized String startHotspot() {
-        // Permission checks (runtime for Android 13+)
+        // Permission checks
         if (Build.VERSION.SDK_INT >= 33
                 && context.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
             return "permission_needed:NEARBY_WIFI_DEVICES";
         }
-        // Location permission required for WiFi ops on Android 12 and below
         if (Build.VERSION.SDK_INT >= 24 && Build.VERSION.SDK_INT < 33
                 && context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             return "permission_needed:ACCESS_FINE_LOCATION";
         }
 
         if (Build.VERSION.SDK_INT >= 29) {
-            return startLocalOnlyHotspot();
-        } else {
-            // Android 9 and below: can't programmatically enable hotspot
-            // Hardcoded to avoid ACTION_WIFI_AP_SETTINGS API-level visibility issues
-            return "redirect:android.settings.WIFI_AP_SETTINGS";
+            String result = startLocalOnlyHotspot();
+            // If LOH is starting, we'll get callback. If it returns "fallback" or error, jump to settings
+            if (result.startsWith("starting")) {
+                return result;
+            }
+            // startLocalOnlyHotspot returned an immediate error — fallback to settings
+            Log.w(TAG, "startLocalOnlyHotspot returned: " + result + " — falling back to system settings");
+            return "fallback";
         }
+        return "fallback";
     }
 
     public synchronized String stopHotspot() {
@@ -74,6 +76,7 @@ public class HotspotHelper {
             try {
                 hotspotReservation.close();
                 hotspotReservation = null;
+                starting = false;
                 notifyState("stopped");
                 return "ok";
             } catch (Exception e) {
@@ -81,8 +84,7 @@ public class HotspotHelper {
                 return "error:" + e.getMessage();
             }
         }
-        // Old Android: jump to settings
-        return "redirect:android.settings.WIFI_AP_SETTINGS";
+        return "fallback";
     }
 
     public synchronized boolean isStarting() { return starting; }
@@ -103,7 +105,6 @@ public class HotspotHelper {
                 }
             }
         } catch (Exception ignored) { }
-        // WifiManager fallback
         try {
             if (wifiManager != null && wifiManager.getConnectionInfo() != null) {
                 int ipInt = wifiManager.getConnectionInfo().getIpAddress();
@@ -119,11 +120,20 @@ public class HotspotHelper {
     // === Android 10+ Local Only Hotspot ===
 
     private String startLocalOnlyHotspot() {
-        if (starting) return "starting";
-        if (hotspotReservation != null) {
-            return "ok:" + getLanIp();
+        Log.i(TAG, "startLocalOnlyHotspot called");
+        if (starting) {
+            Log.i(TAG, "already starting");
+            return "starting";
         }
-        if (wifiManager == null) return "error:no_wifi_manager";
+        if (hotspotReservation != null) {
+            String ip = getLanIp();
+            Log.i(TAG, "already reserved, ip=" + ip);
+            return "ok:" + (ip != null ? ip : "");
+        }
+        if (wifiManager == null) {
+            Log.e(TAG, "wifiManager is null!");
+            return "error:no_wifi_manager";
+        }
 
         starting = true;
         try {
@@ -133,7 +143,8 @@ public class HotspotHelper {
                     super.onStarted(reservation);
                     hotspotReservation = reservation;
                     starting = false;
-                    Log.i(TAG, "LocalOnlyHotspot started");
+                    String ip = getLanIp();
+                    Log.i(TAG, "LocalOnlyHotspot started! ip=" + ip);
                     notifyState("started");
                 }
 
@@ -150,32 +161,75 @@ public class HotspotHelper {
                 public void onFailed(int reason) {
                     super.onFailed(reason);
                     starting = false;
-                    Log.w(TAG, "LocalOnlyHotspot failed: reason=" + reason);
+                    // reason: 0=NO_CHANNEL, 1=REDIRECTION_NOT_ENABLED, 2=SYSTEM_FEATURE_NOT_SUPPORTED
                     String reasonText;
-                    // Use raw int values to avoid API constant availability issues
-                    // 0=NO_CHANNEL, 1=REDIRECTION_NOT_ENABLED, 2=SYSTEM_FEATURE_NOT_SUPPORTED
                     switch (reason) {
                         case 0: reasonText = "no_channel"; break;
                         case 1: reasonText = "redirection_not_enabled"; break;
                         case 2: reasonText = "not_supported"; break;
                         default: reasonText = "unknown(" + reason + ")";
                     }
-                    notifyState("failed:" + reasonText);
+                    Log.e(TAG, "LocalOnlyHotspot FAILED! reason=" + reason + " (" + reasonText + ")");
+                    // Fallback to system settings
+                    notifyState("fallback:" + reasonText);
                 }
             }, null);
+            Log.i(TAG, "startLocalOnlyHotspot() called — waiting for callback...");
             return "starting";
         } catch (SecurityException e) {
             starting = false;
-            Log.e(TAG, "startLocalOnlyHotspot SecurityException: " + e.getMessage());
+            Log.e(TAG, "SecurityException: " + e.getMessage());
             return "permission_needed:NEARBY_WIFI_DEVICES";
+        } catch (IllegalStateException e) {
+            starting = false;
+            Log.e(TAG, "IllegalStateException (WiFi disabled?): " + e.getMessage());
+            // Try to enable WiFi first and retry once
+            try {
+                if (Build.VERSION.SDK_INT <= 30) {
+                    wifiManager.setWifiEnabled(true);
+                    Log.i(TAG, "WiFi re-enabled, retrying startLocalOnlyHotspot...");
+                    starting = true;
+                    wifiManager.startLocalOnlyHotspot(new LocalOnlyHotspotCallback() {
+                        @Override
+                        public void onStarted(LocalOnlyHotspotReservation reservation) {
+                            super.onStarted(reservation);
+                            hotspotReservation = reservation;
+                            starting = false;
+                            Log.i(TAG, "Retry: LocalOnlyHotspot started!");
+                            notifyState("started");
+                        }
+                        @Override
+                        public void onStopped() {
+                            super.onStopped();
+                            hotspotReservation = null;
+                            starting = false;
+                            notifyState("stopped");
+                        }
+                        @Override
+                        public void onFailed(int reason) {
+                            super.onFailed(reason);
+                            starting = false;
+                            Log.e(TAG, "Retry also failed: reason=" + reason);
+                            notifyState("fallback:retry_failed");
+                        }
+                    }, null);
+                    return "starting";
+                }
+            } catch (Exception retryEx) {
+                Log.e(TAG, "Retry exception: " + retryEx.getMessage());
+            }
+            notifyState("fallback:" + e.getMessage());
+            return "fallback";
         } catch (Exception e) {
             starting = false;
-            Log.e(TAG, "startLocalOnlyHotspot failed: " + e.getMessage());
-            return "error:" + e.getMessage();
+            Log.e(TAG, "startLocalOnlyHotspot exception: " + e.getMessage());
+            notifyState("fallback:" + e.getMessage());
+            return "fallback";
         }
     }
 
     private void notifyState(String state) {
+        Log.i(TAG, "notifyState: " + state + " ip=" + getLanIp());
         if (stateListener != null) {
             stateListener.onHotspotStateChanged(state, getLanIp());
         }
