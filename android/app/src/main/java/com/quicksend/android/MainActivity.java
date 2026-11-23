@@ -640,16 +640,27 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     }
 
     private boolean probe() {
+        // === 改成真正的 HTTP 探针：等 Flask 能真正响应请求才算 ready ===
         Socket socket = new Socket();
         try {
             socket.connect(new InetSocketAddress("127.0.0.1", PORT), 800);
-            return true;
         } catch (IOException e) {
-            return false;
+            return false;  // 端口都没监听 → 还没启动
         } finally {
-            try {
-                socket.close();
-            } catch (IOException ignored) { }
+            try { socket.close(); } catch (IOException ignored) { }
+        }
+        // TCP 通了，但 Flask 可能还在初始化 → 发真正的 HTTP 请求
+        try {
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection)
+                    new java.net.URL("http://127.0.0.1:" + PORT + "/api/ip").openConnection();
+            conn.setConnectTimeout(800);
+            conn.setReadTimeout(800);
+            conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(true);
+            int code = conn.getResponseCode();
+            return code >= 200 && code < 500;  // 2xx 3xx 4xx 都算服务活着（404 也比没响应好）
+        } catch (IOException e) {
+            return false;  // Flask 还没 ready 处理 HTTP
         }
     }
 
