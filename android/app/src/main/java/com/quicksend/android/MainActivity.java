@@ -493,8 +493,11 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 return;
             }
             if (webView != null) {
+                String ssid = hotspotHelper != null ? jsEscape(hotspotHelper.getHotspotSsid()) : "";
+                String pwd = hotspotHelper != null ? jsEscape(hotspotHelper.getHotspotPassword()) : "";
                 webView.evaluateJavascript(
-                        "__quicksend.onHotspotState({state:'" + state + "', ip:'" + (lanIp != null ? lanIp : "") + "'})",
+                        "__quicksend.onHotspotState({state:'" + jsEscape(state) + "', ip:'" + jsEscape(lanIp)
+                                + "', ssid:'" + ssid + "', password:'" + pwd + "'})",
                         null);
             }
         });
@@ -541,6 +544,11 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         } catch (Exception e) {
             Toast.makeText(this, "打开失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    private static String jsEscape(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\"").replace("\n", " ");
     }
 
     private AlertDialog hotspotFallbackDialog;

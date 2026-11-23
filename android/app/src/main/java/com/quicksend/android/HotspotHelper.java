@@ -33,6 +33,9 @@ public class HotspotHelper {
     private final WifiManager wifiManager;
     private LocalOnlyHotspotReservation hotspotReservation;
     private volatile boolean starting = false;
+    // LocalOnlyHotspot 的 SSID/密码是系统随机生成的，必须回传给前端展示
+    private volatile String hotspotSsid = "";
+    private volatile String hotspotPassword = "";
 
     // Static holder: MainActivity sets this in onCreate
     public static volatile HotspotStateListener stateListener;
@@ -91,18 +94,76 @@ public class HotspotHelper {
 
     public synchronized boolean isStarting() { return starting; }
 
-    /** Find LAN IP of the active interface (hotspot or WiFi) */
+    public String getHotspotSsid() { return hotspotSsid; }
+
+    public String getHotspotPassword() { return hotspotPassword; }
+
+    public boolean isHotspotActive() { return hotspotReservation != null; }
+
+    /**
+     * 只返回热点网卡（ap0 / swlan0 / wlan1 等）的私有地址。
+     * 之前直接取"第一个非 loopback 地址"，WiFi 关闭时会拿到流量网卡地址（运营商 IP）。
+     */
+    public String getHotspotIp() {
+        try {
+            String fallback = null;
+            Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
+            for (NetworkInterface netint : Collections.list(nets)) {
+                if (!netint.isUp() || netint.isLoopback()) continue;
+                String name = netint.getName().toLowerCase();
+                if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("wwan")
+                        || name.startsWith("pdp") || name.startsWith("clat") || name.startsWith("tun")
+                        || name.startsWith("dummy") || name.startsWith("p2p") || name.startsWith("ppp")) {
+                    continue;  // 流量 / VPN 网卡，直接排除
+                }
+                boolean apLike = name.startsWith("ap") || name.contains("softap")
+                        || name.startsWith("swlan") || name.startsWith("wlan1") || name.startsWith("wlan2");
+                for (InetAddress addr : Collections.list(netint.getInetAddresses())) {
+                    if (!(addr instanceof Inet4Address) || addr.isLoopbackAddress()) continue;
+                    String ip = addr.getHostAddress();
+                    if (!isPrivateIpv4(ip)) continue;
+                    if (apLike) return ip;
+                    if (fallback == null) fallback = ip;
+                }
+            }
+            return fallback;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isPrivateIpv4(String ip) {
+        if (ip.startsWith("192.168.") || ip.startsWith("10.")) return true;
+        if (ip.startsWith("172.")) {
+            try {
+                int second = Integer.parseInt(ip.split("\\.")[1]);
+                return second >= 16 && second <= 31;
+            } catch (Exception ignored) { }
+        }
+        return false;
+    }
+
+    /** Find LAN IP of the active interface (prefer hotspot AP interface) */
     public String getLanIp() {
+        if (hotspotReservation != null) {
+            String apIp = getHotspotIp();
+            if (apIp != null) return apIp;
+        }
         try {
             Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
             for (NetworkInterface netint : Collections.list(nets)) {
                 if (!netint.isUp() || netint.isLoopback()) continue;
-                String name = netint.getName();
-                if (name.startsWith("rmnet") || name.startsWith("ppp")) continue;
+                String name = netint.getName().toLowerCase();
+                if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("wwan")
+                        || name.startsWith("pdp") || name.startsWith("clat") || name.startsWith("tun")
+                        || name.startsWith("dummy") || name.startsWith("ppp")) {
+                    continue;  // 排除流量 / VPN 网卡，避免把运营商 IP 当成本机地址
+                }
                 Enumeration<InetAddress> addrs = netint.getInetAddresses();
                 for (InetAddress addr : Collections.list(addrs)) {
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
-                        return addr.getHostAddress();
+                        String ip = addr.getHostAddress();
+                        if (isPrivateIpv4(ip)) return ip;
                     }
                 }
             }
@@ -143,11 +204,7 @@ public class HotspotHelper {
                 @Override
                 public void onStarted(LocalOnlyHotspotReservation reservation) {
                     super.onStarted(reservation);
-                    hotspotReservation = reservation;
-                    starting = false;
-                    String ip = getLanIp();
-                    Log.i(TAG, "LocalOnlyHotspot started! ip=" + ip);
-                    notifyState("started");
+                    handleHotspotStarted(reservation);
                 }
 
                 @Override
@@ -155,6 +212,8 @@ public class HotspotHelper {
                     super.onStopped();
                     hotspotReservation = null;
                     starting = false;
+                    hotspotSsid = "";
+                    hotspotPassword = "";
                     Log.i(TAG, "LocalOnlyHotspot stopped");
                     notifyState("stopped");
                 }
@@ -196,10 +255,8 @@ public class HotspotHelper {
                         @Override
                         public void onStarted(LocalOnlyHotspotReservation reservation) {
                             super.onStarted(reservation);
-                            hotspotReservation = reservation;
-                            starting = false;
                             Log.i(TAG, "Retry: LocalOnlyHotspot started!");
-                            notifyState("started");
+                            handleHotspotStarted(reservation);
                         }
                         @Override
                         public void onStopped() {
@@ -232,10 +289,46 @@ public class HotspotHelper {
         }
     }
 
+    /** 热点真正起来后：读随机 SSID/密码 + 轮询等 AP 网卡拿到私网地址 */
+    private void handleHotspotStarted(LocalOnlyHotspotReservation reservation) {
+        hotspotReservation = reservation;
+        starting = false;
+        try {
+            if (Build.VERSION.SDK_INT >= 30 && reservation.getWifiConfiguration() != null) {
+                android.net.wifi.WifiConfiguration cfg = reservation.getWifiConfiguration();
+                hotspotSsid = cfg.SSID != null ? cfg.SSID.replace("\"", "") : "";
+                hotspotPassword = cfg.preSharedKey != null ? cfg.preSharedKey.replace("\"", "") : "";
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Read WifiConfiguration failed: " + t.getMessage());
+        }
+        Log.i(TAG, "LocalOnlyHotspot started! ssid=" + hotspotSsid + ", waiting for AP ip...");
+        verifyHotspotStarted(0);
+    }
+
+    private void verifyHotspotStarted(final int attempt) {
+        String ip = getHotspotIp();
+        if (ip != null) {
+            Log.i(TAG, "Hotspot AP ip=" + ip);
+            notifyState("started", ip);
+            return;
+        }
+        if (attempt < 8) {
+            new Handler(Looper.getMainLooper()).postDelayed(() -> verifyHotspotStarted(attempt + 1), 500);
+            return;
+        }
+        Log.w(TAG, "Hotspot started but AP interface has no IPv4 address");
+        notifyState("started", null);
+    }
+
     private void notifyState(String state) {
-        Log.i(TAG, "notifyState: " + state + " ip=" + getLanIp());
+        notifyState(state, getLanIp());
+    }
+
+    private void notifyState(String state, String ip) {
+        Log.i(TAG, "notifyState: " + state + " ip=" + ip);
         if (stateListener != null) {
-            stateListener.onHotspotStateChanged(state, getLanIp());
+            stateListener.onHotspotStateChanged(state, ip);
         }
     }
 

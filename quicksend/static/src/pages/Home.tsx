@@ -526,6 +526,8 @@ const UserProfileCard = ({
   // === Hotspot state ===
   const [hotspotStatus, setHotspotStatus] = useState<'idle' | 'starting' | 'running' | 'stopped' | 'failed' | 'redirect'>('idle');
   const [hotspotIp, setHotspotIp] = useState<string>('');
+  const [hotspotSsid, setHotspotSsid] = useState<string>('');
+  const [hotspotPassword, setHotspotPassword] = useState<string>('');
   const [hotspotError, setHotspotError] = useState<string>('');
   const [hotspotNeedPerm, setHotspotNeedPerm] = useState<string>('');
 
@@ -547,8 +549,13 @@ const UserProfileCard = ({
           }
         },
         onHotspotState: (data: any) => {
-          if (data?.state === 'started') { setHotspotStatus('running'); if (data?.ip) setHotspotIp(data.ip); }
-          else if (data?.state === 'stopped') { setHotspotStatus('idle'); }
+          if (data?.state === 'started') {
+            setHotspotStatus('running');
+            setHotspotIp(data?.ip || '');
+            setHotspotSsid(data?.ssid || '');
+            setHotspotPassword(data?.password || '');
+          }
+          else if (data?.state === 'stopped') { setHotspotStatus('idle'); setHotspotSsid(''); setHotspotPassword(''); setHotspotIp(''); }
           else if (data?.state?.startsWith('failed')) { setHotspotStatus('failed'); setHotspotError(data.state); }
           // fallback: LocalOnlyHotspot 不支持/失败 → 展示具体原因（Java 层会弹框引导）
           else if (data?.state?.startsWith('fallback')) {
@@ -569,6 +576,9 @@ const UserProfileCard = ({
 
   const stopHotspot = () => {
     setHotspotStatus('idle');
+    setHotspotSsid('');
+    setHotspotPassword('');
+    setHotspotIp('');
     window.location.href = 'quicksend://hotspot?action=stop';
   };
 
@@ -709,7 +719,9 @@ const UserProfileCard = ({
                 {hotspotStatus === 'running' ? (
                   <>
                     <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-                    <span className="text-[11px] font-medium text-green-600">热点开启 · {hotspotIp || ipAddress}</span>
+                    <span className="text-[11px] font-medium text-green-600 truncate max-w-[160px]">
+                      热点开启{hotspotSsid ? ` · ${hotspotSsid}` : ''}
+                    </span>
                   </>
                 ) : hotspotStatus === 'starting' ? (
                   <>
@@ -752,10 +764,20 @@ const UserProfileCard = ({
                 </button>
               )}
             </div>
-            {(hotspotStatus === 'running') && hotspotIp && (
-              <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
-                其他设备连这个热点 → 浏览器打开 <code className="font-mono">{hotspotIp}</code>
-              </p>
+            {(hotspotStatus === 'running') && (
+              <div className="text-[10px] text-slate-400 mt-1.5 leading-relaxed space-y-0.5">
+                {(hotspotSsid || hotspotPassword) && (
+                  <p>
+                    热点名称 <code className="font-mono text-slate-600">{hotspotSsid || '（未知）'}</code>
+                    {hotspotPassword ? <> · 密码 <code className="font-mono text-slate-600">{hotspotPassword}</code></> : null}
+                  </p>
+                )}
+                <p>
+                  {hotspotIp
+                    ? <>其他设备连上该热点 → 浏览器打开 <code className="font-mono">http://{hotspotIp}:5000</code></>
+                    : '正在获取热点地址…'}
+                </p>
+              </div>
             )}
           </div>
         )}
