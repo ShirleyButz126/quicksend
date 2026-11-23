@@ -64,7 +64,8 @@ public class HotspotHelper {
             return startLocalOnlyHotspot();
         } else {
             // Android 9 and below: can't programmatically enable hotspot
-            return "redirect:" + Settings.ACTION_WIFI_AP_SETTINGS;
+            // Hardcoded to avoid ACTION_WIFI_AP_SETTINGS API-level visibility issues
+            return "redirect:android.settings.WIFI_AP_SETTINGS";
         }
     }
 
@@ -81,7 +82,7 @@ public class HotspotHelper {
             }
         }
         // Old Android: jump to settings
-        return "redirect:" + Settings.ACTION_WIFI_AP_SETTINGS;
+        return "redirect:android.settings.WIFI_AP_SETTINGS";
     }
 
     public synchronized boolean isStarting() { return starting; }
@@ -154,9 +155,9 @@ public class HotspotHelper {
                     switch (reason) {
                         case LocalOnlyHotspotCallback.ERROR_NO_CHANNEL:
                             reasonText = "no_channel"; break;
-                        case 1: // ERROR_REDIRECTION_NOT_ENABLED (API 30+, value=1)
+                        case LocalOnlyHotspotCallback.ERROR_REDIRECTION_NOT_ENABLED:
                             reasonText = "redirection_not_enabled"; break;
-                        case 2: // ERROR_SYSTEM_FEATURE_NOT_SUPPORTED (API 30+, value=2)
+                        case LocalOnlyHotspotCallback.ERROR_SYSTEM_FEATURE_NOT_SUPPORTED:
                             reasonText = "not_supported"; break;
                         default:
                             reasonText = "unknown(" + reason + ")";
