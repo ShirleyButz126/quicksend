@@ -524,7 +524,22 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             runOnUiThread(() -> {
                 if (finalReady) {
                     splash.setVisibility(View.GONE);
-                    webView.loadUrl("http://127.0.0.1:" + PORT + "/");
+                    // Inject build number into JS globals so frontend can display version
+                    String injectJs = "window.__QUICKSEND_BUILD__ = " + BuildConfig.BUILD_NUMBER + ";";
+                    String loadUrl = "http://127.0.0.1:" + PORT + "/";
+                    // Add headers for first load AND for subsequent requests via WebView
+                    final java.util.Map<String, String> headers = new java.util.HashMap<>();
+                    headers.put("X-QuickSend-Build", String.valueOf(BuildConfig.BUILD_NUMBER));
+                    headers.put("X-Requested-With", "QuickSend");
+                    webView.loadUrl(loadUrl, headers);
+                    // Also inject via evaluateJavascript shortly after page loads
+                    new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                        if (webView != null) {
+                            webView.evaluateJavascript(injectJs, null);
+                            webView.evaluateJavascript(
+                                    "if(window.__quicksend) window.__quicksend.build = " + BuildConfig.BUILD_NUMBER + ";", null);
+                        }
+                    }, 1500);
                 } else {
                     String errorLog = readPythonError();
                     String msg = "服务启动超时\n\n";
