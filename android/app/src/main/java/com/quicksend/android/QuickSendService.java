@@ -122,10 +122,9 @@ public class QuickSendService extends Service {
         copyAsset("static", dest);
         marker.createNewFile();
         // 清理旧版本 marker
-        try (java.io.File[] oldMarkers = dest.listFiles((d, name) -> name.startsWith(".extracted_") && !name.equals(marker.getName()))) {
-            if (oldMarkers != null) {
-                for (java.io.File m : oldMarkers) m.delete();
-            }
+        java.io.File[] oldMarkers = dest.listFiles((d, name) -> name.startsWith(".extracted_") && !name.equals(marker.getName()));
+        if (oldMarkers != null) {
+            for (java.io.File m : oldMarkers) m.delete();
         }
     }
 
