@@ -1524,16 +1524,15 @@ def download_file(filename):
     log(f'[下载] MIME: {mime}')
 
     # Build Content-Disposition (RFC 6266)
-    # filename: UTF-8 直接编码（现代浏览器支持）
-    # filename*: RFC 5987 percent-encoding（老客户端 fallback）
-    # 注意：不能用 base64！必须是 URL percent-encoding
-    utf8_pct = quote(filename, safe='')
+    # ⚠️ HTTP headers MUST be latin-1 encodable! Can't put raw UTF-8 in filename=""
+    # filename* is RFC 5987 percent-encoding (modern browsers read this for real Unicode names)
+    # filename="" must be ASCII-only → use percent-encoded as fallback
+    utf8_pct = quote(filename, safe='')  # Safe for both filename="" and filename*=
 
     if is_preview:
-        # PDF/图片 inline 预览，其他 inline 但 WebView 可能下载
-        cd = f'inline; filename="{filename}"; filename*=UTF-8\'\'{utf8_pct}'
+        cd = f'inline; filename="{utf8_pct}"; filename*=UTF-8\'\'{utf8_pct}'
     else:
-        cd = f'attachment; filename="{filename}"; filename*=UTF-8\'\'{utf8_pct}'
+        cd = f'attachment; filename="{utf8_pct}"; filename*=UTF-8\'\'{utf8_pct}'
 
     response = make_response(send_from_directory(
         app.config['UPLOAD_FOLDER'], filename, as_attachment=False
