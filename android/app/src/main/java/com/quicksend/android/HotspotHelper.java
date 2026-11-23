@@ -152,15 +152,13 @@ public class HotspotHelper {
                     starting = false;
                     Log.w(TAG, "LocalOnlyHotspot failed: reason=" + reason);
                     String reasonText;
+                    // Use raw int values to avoid API constant availability issues
+                    // 0=NO_CHANNEL, 1=REDIRECTION_NOT_ENABLED, 2=SYSTEM_FEATURE_NOT_SUPPORTED
                     switch (reason) {
-                        case LocalOnlyHotspotCallback.ERROR_NO_CHANNEL:
-                            reasonText = "no_channel"; break;
-                        case LocalOnlyHotspotCallback.ERROR_REDIRECTION_NOT_ENABLED:
-                            reasonText = "redirection_not_enabled"; break;
-                        case LocalOnlyHotspotCallback.ERROR_SYSTEM_FEATURE_NOT_SUPPORTED:
-                            reasonText = "not_supported"; break;
-                        default:
-                            reasonText = "unknown(" + reason + ")";
+                        case 0: reasonText = "no_channel"; break;
+                        case 1: reasonText = "redirection_not_enabled"; break;
+                        case 2: reasonText = "not_supported"; break;
+                        default: reasonText = "unknown(" + reason + ")";
                     }
                     notifyState("failed:" + reasonText);
                 }
