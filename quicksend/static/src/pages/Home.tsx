@@ -505,6 +505,55 @@ const UserProfileCard = ({
   const [copied, setCopied] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
 
+  // === Hotspot state ===
+  const [hotspotStatus, setHotspotStatus] = useState<'idle' | 'starting' | 'running' | 'stopped' | 'failed' | 'redirect'>('idle');
+  const [hotspotIp, setHotspotIp] = useState<string>('');
+  const [hotspotError, setHotspotError] = useState<string>('');
+  const [hotspotNeedPerm, setHotspotNeedPerm] = useState<string>('');
+
+  // Register __quicksend JS bridge on mount
+  useEffect(() => {
+    const anyWindow = window as any;
+    if (!anyWindow.__quicksend) {
+      anyWindow.__quicksend = {
+        onHotspotResult: (data: any) => {
+          if (data?.error) { setHotspotStatus('failed'); setHotspotError(data.error); }
+          else if (data?.need_permission) { setHotspotNeedPerm(data.need_permission); }
+          else if (data?.perm_action === 'denied') { setHotspotError('权限被拒绝，无法开启热点'); }
+          else if (data?.redirect) { setHotspotStatus('redirect'); setHotspotError('请在系统设置中手动开启热点'); }
+          else {
+            setHotspotStatus(data?.status?.startsWith('ok') || data?.status?.startsWith('starting') ?
+              (data?.status === 'starting' ? 'starting' : 'running') : 'idle');
+            if (data?.ip) setHotspotIp(data.ip);
+          }
+        },
+        onHotspotState: (data: any) => {
+          if (data?.state === 'started') { setHotspotStatus('running'); if (data?.ip) setHotspotIp(data.ip); }
+          else if (data?.state === 'stopped') { setHotspotStatus('idle'); }
+          else if (data?.state?.startsWith('failed')) { setHotspotStatus('failed'); setHotspotError(data.state); }
+        }
+      };
+    }
+  }, []);
+
+  const startHotspot = () => {
+    setHotspotError('');
+    setHotspotNeedPerm('');
+    setHotspotStatus('starting');
+    window.location.href = 'quicksend://hotspot?action=start';
+  };
+
+  const stopHotspot = () => {
+    setHotspotStatus('idle');
+    window.location.href = 'quicksend://hotspot?action=stop';
+  };
+
+  const requestHotspotPermission = () => {
+    if (!hotspotNeedPerm) return;
+    setHotspotNeedPerm('');
+    window.location.href = `quicksend://request-permission?name=${hotspotNeedPerm}`;
+  };
+
   const handleCopy = () => {
     if (ipAddress) {
       safeCopyText(ipAddress).then(() => {
@@ -615,6 +664,66 @@ const UserProfileCard = ({
             }
           `}</style>
         </div>
+
+        {/* === 热点模式（仅服务器端）=== */}
+        {isHost && (
+          <div className="pt-2 border-t border-slate-100">
+            <label className="text-xs font-medium text-slate-500 mb-1.5 block">无 Wi-Fi 模式</label>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                {hotspotStatus === 'running' ? (
+                  <>
+                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
+                    <span className="text-[11px] font-medium text-green-600">热点开启 · {hotspotIp || ipAddress}</span>
+                  </>
+                ) : hotspotStatus === 'starting' ? (
+                  <>
+                    <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
+                    <span className="text-[11px] font-medium text-amber-600">正在开启…</span>
+                  </>
+                ) : hotspotStatus === 'failed' || hotspotStatus === 'redirect' ? (
+                  <>
+                    <div className="w-1.5 h-1.5 rounded-full bg-red-500"></div>
+                    <span className="text-[11px] font-medium text-red-600 truncate max-w-[160px]">{hotspotError}</span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>
+                    <span className="text-[11px] font-medium text-slate-500">热点未开启</span>
+                  </>
+                )}
+              </div>
+              {hotspotStatus === 'running' || hotspotStatus === 'starting' ? (
+                <button
+                  onClick={stopHotspot}
+                  className="px-3 py-1.5 text-[11px] font-medium bg-red-50 hover:bg-red-100 text-red-600 rounded-md transition-colors border border-red-200"
+                >
+                  关闭热点
+                </button>
+              ) : hotspotNeedPerm ? (
+                <button
+                  onClick={requestHotspotPermission}
+                  className="px-3 py-1.5 text-[11px] font-medium bg-amber-50 hover:bg-amber-100 text-amber-600 rounded-md transition-colors border border-amber-200"
+                >
+                  授予权限
+                </button>
+              ) : (
+                <button
+                  onClick={startHotspot}
+                  className="px-3 py-1.5 text-[11px] font-medium bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-md transition-colors border border-indigo-200"
+                >
+                  <Wifi size={12} className="inline -mt-0.5 mr-1" />
+                  一键开热点
+                </button>
+              )}
+            </div>
+            {(hotspotStatus === 'running') && hotspotIp && (
+              <p className="text-[10px] text-slate-400 mt-1.5 leading-relaxed">
+                其他设备连这个热点 → 浏览器打开 <code className="font-mono">{hotspotIp}</code>
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
