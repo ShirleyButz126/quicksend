@@ -16,6 +16,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -40,12 +41,14 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.List;
 
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements HotspotHelper.HotspotListener {
 
     private static final int PORT = 5000;
     private static final int REQ_FILE = 1001;
     private static final int REQ_NOTIFICATIONS = 1002;
     private static final int REQ_WRITE_STORAGE = 1003;
+    private static final int REQ_NEARBY_WIFI = 1004;
+    private static final int REQ_LOCATION = 1005;
     private static final String DOWNLOAD_SUBDIR = "QuickSend";
     private static final String FILEPROVIDER_AUTH = "com.quicksend.android.fileprovider";
 
@@ -56,6 +59,8 @@ public class MainActivity extends Activity {
     private long lastDownloadId = -1;
     private String lastDownloadName;
     private String pendingUrl, pendingUserAgent, pendingContentDisposition, pendingMime, pendingName;
+
+    private HotspotHelper hotspotHelper;
 
     private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
         @Override
@@ -84,6 +89,9 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
+
+        hotspotHelper = new HotspotHelper(this);
+        HotspotHelper.HotspotListener.instance = this;
 
         setupWebView();
 
@@ -127,6 +135,14 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
                 if (url != null && url.startsWith("quicksend://open")) {
                     handleNativeOpen(url);
+                    return true;
+                }
+                if (url != null && url.startsWith("quicksend://hotspot")) {
+                    handleHotspotRequest(url);
+                    return true;
+                }
+                if (url != null && url.startsWith("quicksend://request-permission")) {
+                    handlePermissionRequest(url);
                     return true;
                 }
                 return false;  // 返回 false 让 WebView 自己加载 http/https
@@ -358,6 +374,80 @@ public class MainActivity extends Activity {
         }
     }
 
+    // === 热点 API：quicksend://hotspot?action=start|stop|status ===
+    private void handleHotspotRequest(String url) {
+        try {
+            Uri uri = Uri.parse(url);
+            String action = uri.getQueryParameter("action");
+            if (action == null) {
+                webView.evaluateJavascript("__quicksend.onHotspotResult({error:'no_action'})", null);
+                return;
+            }
+            String result = "";
+            switch (action) {
+                case "start":
+                    if (hotspotHelper.needsNearbyWifiPermission()) {
+                        requestPermissions(new String[]{Manifest.permission.NEARBY_WIFI_DEVICES}, REQ_NEARBY_WIFI);
+                        webView.evaluateJavascript("__quicksend.onHotspotResult({need_permission:'NEARBY_WIFI_DEVICES'})", null);
+                        return;
+                    }
+                    if (hotspotHelper.needsLocationPermission()) {
+                        requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION);
+                        webView.evaluateJavascript("__quicksend.onHotspotResult({need_permission:'ACCESS_FINE_LOCATION'})", null);
+                        return;
+                    }
+                    result = hotspotHelper.startHotspot();
+                    break;
+                case "stop":
+                    result = hotspotHelper.stopHotspot();
+                    break;
+                case "status":
+                    result = (hotspotHelper.isStarting() ? "starting" : "idle") + ":" + hotspotHelper.getLanIp();
+                    break;
+                default:
+                    result = "error:unknown_action:" + action;
+            }
+            // If result starts with "redirect:", open system settings page
+            if (result.startsWith("redirect:")) {
+                startActivity(new Intent(result.substring("redirect:".length())));
+                webView.evaluateJavascript("__quicksend.onHotspotResult({redirect:true})", null);
+                Toast.makeText(this, "请在系统设置中手动开启热点", Toast.LENGTH_LONG).show();
+                return;
+            }
+            String lanIp = hotspotHelper.getLanIp();
+            webView.evaluateJavascript(
+                    "__quicksend.onHotspotResult({ip:'" + (lanIp != null ? lanIp : "") + "', status:'" + result.replace("'", "\\'") + "'})",
+                    null);
+        } catch (Exception e) {
+            webView.evaluateJavascript("__quicksend.onHotspotResult({error:'" + e.getMessage().replace("'", "\\'") + "'})", null);
+        }
+    }
+
+    // === 请求权限：quicksend://request-permission?name=NEARBY_WIFI_DEVICES ===
+    private void handlePermissionRequest(String url) {
+        try {
+            Uri uri = Uri.parse(url);
+            String name = uri.getQueryParameter("name");
+            if ("NEARBY_WIFI_DEVICES".equals(name)) {
+                requestPermissions(new String[]{Manifest.permission.NEARBY_WIFI_DEVICES}, REQ_NEARBY_WIFI);
+            } else if ("ACCESS_FINE_LOCATION".equals(name)) {
+                requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, REQ_LOCATION);
+            }
+        } catch (Exception ignored) { }
+    }
+
+    // === HotspotHelper.HotspotListener 回调 ===
+    @Override
+    public void onHotspotStateChanged(final String state, final String lanIp) {
+        runOnUiThread(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript(
+                        "__quicksend.onHotspotState({state:'" + state + "', ip:'" + (lanIp != null ? lanIp : "") + "'})",
+                        null);
+            }
+        });
+    }
+
     // === 前端调用「打开」文件：quicksend://open?path=<encoded>&mime=<encoded> ===
     // 关键修复：用 FileProvider 替代 Uri.fromFile()，否则 Android 7+ 崩溃
     private void handleNativeOpen(String url) {
@@ -483,6 +573,32 @@ public class MainActivity extends Activity {
             pendingContentDisposition = null;
             pendingMime = null;
             pendingName = null;
+            return;
+        }
+        if (requestCode == REQ_NEARBY_WIFI || requestCode == REQ_LOCATION) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            String permName = (requestCode == REQ_NEARBY_WIFI) ? "NEARBY_WIFI_DEVICES" : "ACCESS_FINE_LOCATION";
+            String action = "granted";
+            if (!granted) action = "denied";
+            if (webView != null) {
+                webView.evaluateJavascript(
+                        "__quicksend.onHotspotResult({perm:'" + permName + "', perm_action:'" + action + "'})", null);
+            }
+            // If granted, retry startHotspot
+            if (granted && hotspotHelper != null) {
+                String result = hotspotHelper.startHotspot();
+                if (!result.startsWith("redirect:")) {
+                    String lanIp = hotspotHelper.getLanIp();
+                    if (webView != null) {
+                        webView.evaluateJavascript(
+                                "__quicksend.onHotspotResult({ip:'" + (lanIp != null ? lanIp : "") + "', status:'" + result.replace("'", "\\'") + "'})",
+                                null);
+                    }
+                } else {
+                    startActivity(new Intent(result.substring("redirect:".length())));
+                    Toast.makeText(this, "请在系统设置中手动开启热点", Toast.LENGTH_LONG).show();
+                }
+            }
             return;
         }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
