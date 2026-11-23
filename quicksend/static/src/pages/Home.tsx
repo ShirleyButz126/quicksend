@@ -575,7 +575,18 @@ const UserProfileCard = ({
           <div className="w-8 h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center shrink-0">
             <Zap size={16} fill="currentColor" className="text-yellow-400" />
           </div>
-          <span className="font-bold text-slate-900">QuickSend</span>
+          <div className="flex flex-col">
+            <span className="font-bold text-slate-900 leading-tight">QuickSend</span>
+            <span className="text-[10px] text-slate-400 leading-tight">
+              v{config?.version || '—'}
+              {(() => {
+                const build = (typeof window !== 'undefined') ? (window as any).__QUICKSEND_BUILD__ : null;
+                if (build) return ` · APK-${build}`;
+                if (config?.build) return ` · APK-${config.build}`;
+                return '';
+              })()}
+            </span>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {isHost && (
