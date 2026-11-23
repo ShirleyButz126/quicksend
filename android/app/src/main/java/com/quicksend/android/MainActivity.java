@@ -445,14 +445,15 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 default:
                     result = "error:unknown_action:" + action;
             }
-            // Handle fallback → jump to system hotspot settings
+            // Handle fallback → show reason, then guide to system hotspot settings
             if ("fallback".equals(result) || result.startsWith("error:")) {
-                String errMsg = "fallback".equals(result) ? "系统不支持自动开热点" : result.substring(6);
+                String errMsg = "fallback".equals(result) ? "fallback:unknown" : "fallback:" + result.substring(6);
                 Log.w("QuickSend", "Hotspot start fallback, reason=" + errMsg);
-                startActivity(new Intent("android.settings.WIFI_AP_SETTINGS"));
-                webView.evaluateJavascript(
-                        "__quicksend.onHotspotResult({redirect:true, error:'" + errMsg.replace("'", "\\'") + "'})", null);
-                Toast.makeText(this, "请在系统设置中手动开启热点", Toast.LENGTH_LONG).show();
+                if (webView != null) {
+                    webView.evaluateJavascript(
+                            "__quicksend.onHotspotState({state:'" + errMsg.replace("'", "\\'") + "'})", null);
+                }
+                showHotspotFallbackDialog(errMsg);
                 return;
             }
             String lanIp = hotspotHelper.getLanIp();
@@ -483,13 +484,12 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         runOnUiThread(() -> {
             Log.i("QuickSend", "onHotspotStateChanged: state=" + state + " ip=" + lanIp);
             if (state.startsWith("fallback")) {
-                // LocalOnlyHotspot failed → jump to system settings
+                // LocalOnlyHotspot failed → explain the reason, then offer system settings
                 Log.w("QuickSend", "Hotspot callback fallback: " + state);
-                try { startActivity(new Intent("android.settings.WIFI_AP_SETTINGS")); } catch (Exception ignored) {}
                 webView.evaluateJavascript(
                         "__quicksend.onHotspotState({state:'" + state.replace("'", "\\'") + "', ip:'" + (lanIp != null ? lanIp : "") + "'})",
                         null);
-                Toast.makeText(this, "系统不支持自动热点，请在设置中手动开启", Toast.LENGTH_LONG).show();
+                showHotspotFallbackDialog(state);
                 return;
             }
             if (webView != null) {
@@ -541,6 +541,52 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         } catch (Exception e) {
             Toast.makeText(this, "打开失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    private AlertDialog hotspotFallbackDialog;
+
+    /** 把 LocalOnlyHotspot 的失败原因翻译成用户能看懂的话，并引导手动开热点 */
+    private void showHotspotFallbackDialog(String state) {
+        String code = state == null ? "" : state;
+        if (code.startsWith("fallback:")) code = code.substring("fallback:".length());
+        String base;
+        if (code.startsWith("no_channel")) {
+            base = "系统没有可用的热点信道（常见原因是当前 Wi-Fi 占用了信道）。";
+        } else if (code.startsWith("incompatible_mode")) {
+            base = "系统当前模式不支持开启热点（例如正在投屏或使用无线显示）。";
+        } else if (code.startsWith("tethering_disallowed")) {
+            base = "系统或设备管理策略禁止开启热点。";
+        } else if (code.startsWith("timeout")) {
+            base = "系统在 12 秒内没有响应，该机型可能不允许应用内开启热点。";
+        } else if (code.startsWith("retry_failed")) {
+            base = "重试后系统仍拒绝开启热点。";
+        } else if (code.startsWith("permission_needed")) {
+            base = "缺少开启热点所需的系统权限。";
+        } else {
+            base = "系统返回自动开热点失败。";
+        }
+        if (code.contains("wifi_on")) {
+            base += "\n\n检测到 Wi-Fi 已连接，建议先关闭 Wi-Fi 再点一次「一键开热点」。";
+        }
+        base += "\n\n原因代码：" + (code.isEmpty() ? "unknown" : code)
+                + "\n\n你也可以在系统设置中手动开启「个人热点」，再回到本应用。";
+        if (isFinishing()) return;
+        if (hotspotFallbackDialog != null && hotspotFallbackDialog.isShowing()) {
+            hotspotFallbackDialog.dismiss();
+        }
+        hotspotFallbackDialog = new AlertDialog.Builder(this)
+                .setTitle("无法自动开启热点")
+                .setMessage(base)
+                .setPositiveButton("去系统设置", (dialog, which) -> {
+                    try {
+                        startActivity(new Intent("android.settings.WIFI_AP_SETTINGS"));
+                    } catch (Exception e) {
+                        Toast.makeText(MainActivity.this, "无法打开热点设置：" + e.getMessage(),
+                                Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
     }
 
     private void waitForServer() {
@@ -696,14 +742,14 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 // startHotspot returns: "starting"/"ok" → async OK
                 //   "fallback"/"error:xxx"/"permission_needed:xxx" → sync fail
                 if ("fallback".equals(result) || result.startsWith("error:") || result.startsWith("permission_needed:")) {
-                    String errMsg = "fallback".equals(result) ? "系统不支持自动开热点" : result;
+                    String errMsg = "fallback".equals(result) ? "fallback:unknown"
+                            : (result.startsWith("error:") ? "fallback:" + result.substring(6) : result);
                     Log.w("QuickSend", "Hotspot retry sync fail: " + errMsg);
-                    try { startActivity(new Intent("android.settings.WIFI_AP_SETTINGS")); } catch (Exception ignored) {}
                     if (webView != null) {
                         webView.evaluateJavascript(
-                                "__quicksend.onHotspotState({state:'fallback:" + errMsg.replace("'", "\\'") + "'})", null);
+                                "__quicksend.onHotspotState({state:'" + errMsg.replace("'", "\\'") + "'})", null);
                     }
-                    Toast.makeText(this, "请在系统设置中手动开启热点", Toast.LENGTH_LONG).show();
+                    showHotspotFallbackDialog(errMsg);
                 } else {
                     // "starting" or "ok" → 正常路径，等 LocalOnlyHotspot 回调
                     String lanIp = hotspotHelper.getLanIp();

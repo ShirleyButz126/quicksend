@@ -55,6 +55,20 @@ import { Globe } from 'lucide-react';
 
 // --- Utility Functions ---
 
+// 把原生层 LocalOnlyHotspot 的失败原因翻译成可读提示
+const explainHotspotFallback = (state: string): string => {
+  const code = String(state || '').replace(/^fallback:?/, '');
+  let msg = '开启失败，请在系统设置中手动开启热点';
+  if (code.includes('no_channel')) msg = '开启失败：热点信道被占用，请先关闭 Wi-Fi 再试';
+  else if (code.includes('incompatible_mode')) msg = '开启失败：当前模式不支持热点（如投屏中）';
+  else if (code.includes('tethering_disallowed')) msg = '开启失败：系统禁止开启热点';
+  else if (code.includes('timeout')) msg = '开启失败：系统 12 秒无响应，请手动开启热点';
+  else if (code.includes('retry_failed')) msg = '开启失败：重试仍被系统拒绝';
+  else if (code.includes('permission_needed')) msg = '开启失败：缺少热点权限';
+  if (code.includes('wifi_on')) msg += '（Wi-Fi 已连接）';
+  return msg;
+};
+
 const formatSize = (bytes: number): string => {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -535,10 +549,10 @@ const UserProfileCard = ({
           if (data?.state === 'started') { setHotspotStatus('running'); if (data?.ip) setHotspotIp(data.ip); }
           else if (data?.state === 'stopped') { setHotspotStatus('idle'); }
           else if (data?.state?.startsWith('failed')) { setHotspotStatus('failed'); setHotspotError(data.state); }
-          // fallback: LocalOnlyHotspot 不支持/失败 → 跳系统设置（Java 层已调 startActivity）
+          // fallback: LocalOnlyHotspot 不支持/失败 → 展示具体原因（Java 层会弹框引导）
           else if (data?.state?.startsWith('fallback')) {
-            setHotspotStatus('redirect');
-            setHotspotError('请在系统设置中手动开启热点');
+            setHotspotStatus('failed');
+            setHotspotError(explainHotspotFallback(data.state));
           }
         }
       };

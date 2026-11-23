@@ -163,29 +163,20 @@ public class HotspotHelper {
                 public void onFailed(int reason) {
                     super.onFailed(reason);
                     starting = false;
-                    // reason: 0=NO_CHANNEL, 1=REDIRECTION_NOT_ENABLED, 2=SYSTEM_FEATURE_NOT_SUPPORTED
-                    String reasonText;
-                    switch (reason) {
-                        case 0: reasonText = "no_channel"; break;
-                        case 1: reasonText = "redirection_not_enabled"; break;
-                        case 2: reasonText = "not_supported"; break;
-                        default: reasonText = "unknown(" + reason + ")";
-                    }
-                    Log.e(TAG, "LocalOnlyHotspot FAILED! reason=" + reason + " (" + reasonText + ")");
-                    // Fallback to system settings
-                    notifyState("fallback:" + reasonText);
+                    Log.e(TAG, "LocalOnlyHotspot FAILED! reason=" + reason + " (" + reasonText(reason) + ")");
+                    notifyState("fallback:" + reasonText(reason) + (isWifiConnected() ? "|wifi_on" : "|wifi_off"));
                 }
             }, null);
             Log.i(TAG, "startLocalOnlyHotspot() called — waiting for callback...");
 
-            // === 5 秒超时保护：某些设备 LOH 永远不回调 ===
+            // === 12 秒超时保护：部分机型 LOH 回包很慢，5 秒会误判 ===
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 if (starting) {
-                    Log.w(TAG, "LocalOnlyHotspot timeout (5s) — no callback received, forcing fallback");
+                    Log.w(TAG, "LocalOnlyHotspot timeout (12s) — no callback received, forcing fallback");
                     starting = false;
-                    notifyState("fallback:timeout");
+                    notifyState("fallback:timeout" + (isWifiConnected() ? "|wifi_on" : "|wifi_off"));
                 }
-            }, 5000);
+            }, 12000);
 
             return "starting";
         } catch (SecurityException e) {
@@ -221,8 +212,9 @@ public class HotspotHelper {
                         public void onFailed(int reason) {
                             super.onFailed(reason);
                             starting = false;
-                            Log.e(TAG, "Retry also failed: reason=" + reason);
-                            notifyState("fallback:retry_failed");
+                            Log.e(TAG, "Retry also failed: reason=" + reason + " (" + reasonText(reason) + ")");
+                            notifyState("fallback:retry_failed:" + reasonText(reason)
+                                    + (isWifiConnected() ? "|wifi_on" : "|wifi_off"));
                         }
                     }, null);
                     return "starting";
@@ -244,6 +236,27 @@ public class HotspotHelper {
         Log.i(TAG, "notifyState: " + state + " ip=" + getLanIp());
         if (stateListener != null) {
             stateListener.onHotspotStateChanged(state, getLanIp());
+        }
+    }
+
+    /** LocalOnlyHotspot 失败原因码 → 可读标识 */
+    private static String reasonText(int reason) {
+        switch (reason) {
+            case WifiManager.LocalOnlyHotspotCallback.ERROR_NO_CHANNEL: return "no_channel";
+            case WifiManager.LocalOnlyHotspotCallback.ERROR_INCOMPATIBLE_MODE: return "incompatible_mode";
+            case WifiManager.LocalOnlyHotspotCallback.ERROR_TETHERING_DISALLOWED: return "tethering_disallowed";
+            case WifiManager.LocalOnlyHotspotCallback.ERROR_GENERIC: return "generic";
+            default: return "unknown(" + reason + ")";
+        }
+    }
+
+    /** 当前是否已连接 Wi-Fi（部分机型连接 Wi-Fi 时无法开热点） */
+    public boolean isWifiConnected() {
+        try {
+            android.net.wifi.WifiInfo info = wifiManager != null ? wifiManager.getConnectionInfo() : null;
+            return info != null && info.getNetworkId() != -1;
+        } catch (Exception e) {
+            return false;
         }
     }
 
