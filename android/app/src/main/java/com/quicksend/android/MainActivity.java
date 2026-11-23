@@ -109,10 +109,16 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         }
 
         Intent serviceIntent = new Intent(this, QuickSendService.class);
-        if (Build.VERSION.SDK_INT >= 26) {
-            startForegroundService(serviceIntent);
-        } else {
-            startService(serviceIntent);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(serviceIntent);
+            } else {
+                startService(serviceIntent);
+            }
+            Log.i("QuickSend", "QuickSendService started OK");
+        } catch (Exception e) {
+            Log.e("QuickSend", "Failed to start QuickSendService", e);
+            Toast.makeText(this, "服务启动失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
         }
 
         waitForServer();
@@ -147,6 +153,35 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     return true;
                 }
                 return false;  // 返回 false 让 WebView 自己加载 http/https
+            }
+
+            @Override
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                super.onReceivedError(view, errorCode, description, failingUrl);
+                Log.e("QuickSend", "WebView error: code=" + errorCode + " desc=" + description + " url=" + failingUrl);
+                // 只对主框架错误做提示
+                if (failingUrl != null && failingUrl.startsWith("http://127.0.0.1")) {
+                    Toast.makeText(MainActivity.this,
+                            "加载页面失败 (错误 " + errorCode + "): " + description, Toast.LENGTH_LONG).show();
+                }
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request,
+                                            android.webkit.WebResourceResponse errorResponse) {
+                super.onReceivedHttpError(view, request, errorResponse);
+                if (request.isForMainFrame()) {
+                    int code = errorResponse.getStatusCode();
+                    Log.e("QuickSend", "HTTP error on main frame: " + code + " " + request.getUrl());
+                    Toast.makeText(MainActivity.this,
+                            "服务器返回错误: HTTP " + code, Toast.LENGTH_LONG).show();
+                }
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                Log.i("QuickSend", "WebView page finished: " + url + " title=" + view.getTitle());
             }
         });
 
@@ -525,6 +560,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             runOnUiThread(() -> {
                 if (finalReady) {
                     splash.setVisibility(View.GONE);
+                    Toast.makeText(MainActivity.this, "服务就绪，加载页面…", Toast.LENGTH_SHORT).show();
                     // Inject build number into JS globals so frontend can display version
                     String injectJs = "window.__QUICKSEND_BUILD__ = " + BuildConfig.BUILD_NUMBER + ";";
                     String loadUrl = "http://127.0.0.1:" + PORT + "/";
