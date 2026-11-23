@@ -62,15 +62,15 @@ public class HotspotHelper {
 
         if (Build.VERSION.SDK_INT >= 29) {
             String result = startLocalOnlyHotspot();
-            // If LOH is starting, we'll get callback. If it returns "fallback" or error, jump to settings
-            if (result.startsWith("starting")) {
+            // 已经在运行 / 正在启动 → 直接返回，不要误报失败
+            if (result.startsWith("starting") || result.startsWith("ok")) {
                 return result;
             }
-            // startLocalOnlyHotspot returned an immediate error — fallback to settings
-            Log.w(TAG, "startLocalOnlyHotspot returned: " + result + " — falling back to system settings");
-            return "fallback";
+            // 保留真实失败原因，交给上层展示，不要再覆盖成 unknown
+            Log.w(TAG, "startLocalOnlyHotspot returned: " + result);
+            return result.startsWith("error:") ? result : "error:" + result;
         }
-        return "fallback";
+        return "error:not_supported_below_android10";
     }
 
     public synchronized String stopHotspot() {
@@ -182,11 +182,11 @@ public class HotspotHelper {
         } catch (SecurityException e) {
             starting = false;
             Log.e(TAG, "SecurityException: " + e.getMessage());
-            return "permission_needed:NEARBY_WIFI_DEVICES";
+            return "error:security:" + e.getMessage();
         } catch (IllegalStateException e) {
             starting = false;
             Log.e(TAG, "IllegalStateException (WiFi disabled?): " + e.getMessage());
-            // Try to enable WiFi first and retry once
+            // Android 10+ 无法用代码开关 Wi-Fi，先尝试（旧系统有效），再重试一次
             try {
                 if (Build.VERSION.SDK_INT <= 30) {
                     wifiManager.setWifiEnabled(true);
@@ -220,15 +220,15 @@ public class HotspotHelper {
                     return "starting";
                 }
             } catch (Exception retryEx) {
+                starting = false;
                 Log.e(TAG, "Retry exception: " + retryEx.getMessage());
+                return "error:retry_" + retryEx.getClass().getSimpleName() + ":" + retryEx.getMessage();
             }
-            notifyState("fallback:" + e.getMessage());
-            return "fallback";
+            return "error:illegal_state:" + e.getMessage();
         } catch (Exception e) {
             starting = false;
-            Log.e(TAG, "startLocalOnlyHotspot exception: " + e.getMessage());
-            notifyState("fallback:" + e.getMessage());
-            return "fallback";
+            Log.e(TAG, "startLocalOnlyHotspot exception: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return "error:" + e.getClass().getSimpleName() + ":" + e.getMessage();
         }
     }
 

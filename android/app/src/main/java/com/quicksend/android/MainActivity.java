@@ -558,7 +558,11 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             base = "系统或设备管理策略禁止开启热点。";
         } else if (code.startsWith("timeout")) {
             base = "系统在 12 秒内没有响应，该机型可能不允许应用内开启热点。";
-        } else if (code.startsWith("retry_failed")) {
+        } else if (code.startsWith("security")) {
+            base = "系统拒绝了热点请求（权限不足或机型限制）。";
+        } else if (code.startsWith("illegal_state") || code.startsWith("not_supported")) {
+            base = "系统当前状态不允许开启热点（可能 Wi-Fi 已关闭或该机型限制）。";
+        } else if (code.startsWith("retry_")) {
             base = "重试后系统仍拒绝开启热点。";
         } else if (code.startsWith("permission_needed")) {
             base = "缺少开启热点所需的系统权限。";
@@ -577,16 +581,33 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         hotspotFallbackDialog = new AlertDialog.Builder(this)
                 .setTitle("无法自动开启热点")
                 .setMessage(base)
-                .setPositiveButton("去系统设置", (dialog, which) -> {
-                    try {
-                        startActivity(new Intent("android.settings.WIFI_AP_SETTINGS"));
-                    } catch (Exception e) {
-                        Toast.makeText(MainActivity.this, "无法打开热点设置：" + e.getMessage(),
-                                Toast.LENGTH_LONG).show();
-                    }
-                })
+                .setPositiveButton("去系统设置", (dialog, which) -> openHotspotSettings())
                 .setNegativeButton("关闭", null)
                 .show();
+    }
+
+    /** 各机型热点设置页 Action 不一致，按顺序尝试，避免 No Activity found */
+    private boolean openHotspotSettings() {
+        String[] actions = new String[]{
+                "android.settings.WIFI_AP_SETTINGS",
+                "android.settings.TETHER_SETTINGS",
+                Settings.ACTION_WIRELESS_SETTINGS,
+                Settings.ACTION_SETTINGS
+        };
+        for (String action : actions) {
+            try {
+                Intent intent = new Intent(action);
+                if (intent.resolveActivity(getPackageManager()) != null) {
+                    startActivity(intent);
+                    Log.i("QuickSend", "Opened settings: " + action);
+                    return true;
+                }
+            } catch (Exception e) {
+                Log.w("QuickSend", "Settings action failed: " + action + " — " + e.getMessage());
+            }
+        }
+        Toast.makeText(this, "无法打开热点设置，请手动进入「设置 → 个人热点」", Toast.LENGTH_LONG).show();
+        return false;
     }
 
     private void waitForServer() {

@@ -537,6 +537,7 @@ const UserProfileCard = ({
         onHotspotResult: (data: any) => {
           if (data?.error) { setHotspotStatus('failed'); setHotspotError(data.error); }
           else if (data?.need_permission) { setHotspotNeedPerm(data.need_permission); }
+          else if (data?.perm_action === 'granted') { setHotspotNeedPerm(''); setHotspotError(''); }
           else if (data?.perm_action === 'denied') { setHotspotError('权限被拒绝，无法开启热点'); }
           else if (data?.redirect) { setHotspotStatus('redirect'); setHotspotError('请在系统设置中手动开启热点'); }
           else {
