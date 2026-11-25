@@ -85,9 +85,24 @@ jobs:
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
+      - name: Report signer fingerprint
+        id: signcheck
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "apksigner 未找到，跳过签名指纹检测"
+            exit 0
+          fi
+          OUT=$("$APKSIGNER" verify --print-certs android/app/build/outputs/apk/debug/app-debug.apk)
+          echo "$OUT"
+          FP=$(echo "$OUT" | grep -i "certificate SHA-256 digest" | head -1)
+          echo "fingerprint=$FP" >> "$GITHUB_OUTPUT"
+
       - name: Publish APK to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-${{ github.run_number }}
           name: QuickSend APK ${{ github.run_number }}
+          body: |
+            ${{ steps.signcheck.outputs.fingerprint }}
           files: android/app/build/outputs/apk/debug/*.apk
