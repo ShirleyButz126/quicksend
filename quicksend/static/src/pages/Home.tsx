@@ -2825,7 +2825,19 @@ const Home = () => {
                 data.port = portStr ? parseInt(portStr, 10) : (window.location.protocol === 'https:' ? 443 : 80);
             }
         }
-        setConfig(data);
+        setConfig(prev => {
+          // 定时轮询时避免无意义的重渲染（只比较会影响展示的字段）
+          if (prev
+            && prev.ip === data.ip
+            && prev.port === data.port
+            && prev.upload_dir === data.upload_dir
+            && prev.mode === data.mode
+            && prev.use_source_date === data.use_source_date
+            && prev.allow_remote_group_create === data.allow_remote_group_create) {
+            return prev;
+          }
+          return data;
+        });
       })
       .catch(console.error);
   };
