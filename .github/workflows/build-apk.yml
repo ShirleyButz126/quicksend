@@ -46,26 +46,34 @@ jobs:
 
       - name: Prepare fixed signing key
         env:
-          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
-          KS_B64_ALT: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KS_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KS_B64_ALT: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_STOREPWD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KS_STOREPWD_ALT: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KS_ALIAS_ALT: ${{ secrets.KEY_ALIAS }}
+          KS_KEYPWD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          KS_KEYPWD_ALT: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # 只需要 keystore 本体；密码/别名用固定 debug 值（见仓库 fixed-debug.keystore）
           BASE64_VALUE="${KS_B64:-$KS_B64_ALT}"
+          STORE_PASSWORD="${KS_STOREPWD:-$KS_STOREPWD_ALT}"
+          ALIAS_VALUE="${KS_ALIAS:-$KS_ALIAS_ALT}"
+          KEYPWD_VALUE="${KS_KEYPWD:-$KS_KEYPWD_ALT}"
           if [ -z "$BASE64_VALUE" ]; then
-            echo "未找到 KEYSTORE_BASE64 / RELEASE_KEYSTORE_BASE64，沿用默认 debug 签名（签名会随每次构建变化）"
+            echo "未找到 RELEASE_KEYSTORE_BASE64 / KEYSTORE_BASE64，沿用默认 debug 签名（签名会随每次构建变化）"
             exit 0
           fi
           echo "$BASE64_VALUE" | base64 -d > android/app/fixed-debug.keystore
           {
             echo "storeFile=fixed-debug.keystore"
-            echo "storePassword=android"
-            echo "keyAlias=androiddebugkey"
-            echo "keyPassword=android"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$ALIAS_VALUE"
+            echo "keyPassword=$KEYPWD_VALUE"
             echo "storeType=pkcs12"
           } > android/app/keystore.properties
           ls -l android/app/fixed-debug.keystore
           # 提前校验 keystore 是否可用，避免到 gradle 里才报错
-          keytool -list -keystore android/app/fixed-debug.keystore -storepass android | head -5
+          keytool -list -keystore android/app/fixed-debug.keystore -storepass "$STORE_PASSWORD" | head -5
 
       - name: Build debug APK
         run: gradle -p android assembleDebug --no-daemon --stacktrace
