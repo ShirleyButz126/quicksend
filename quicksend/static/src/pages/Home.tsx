@@ -782,6 +782,10 @@ const UserProfileCard = ({
             setHotspotStatus('failed');
             setHotspotError(explainHotspotFallback(data.state));
           }
+        },
+        // 网络切换（流量 <-> Wi-Fi）后原生层会通知，重新拉取本机地址
+        onNetworkChange: () => {
+          onRefreshIp?.();
         }
       };
     }
@@ -925,7 +929,7 @@ const UserProfileCard = ({
               <div className="relative overflow-hidden">
                 <code className="text-sm font-mono font-medium text-slate-100 whitespace-nowrap truncate group-hover/ip:overflow-visible group-hover/ip:text-clip transition-all duration-300">
                   <span className="group-hover/ip:animate-[marquee_5s_linear_infinite] inline-block">
-                    {displayAddress || '获取中...'}
+                    {displayAddress === '' ? '未连接局域网，请连接 Wi-Fi 或开启热点' : (displayAddress || '获取中...')}
                   </span>
                 </code>
               </div>
@@ -934,6 +938,10 @@ const UserProfileCard = ({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (!displayAddress) {
+                    alert('当前没有局域网地址，请连接 Wi-Fi 或开启热点');
+                    return;
+                  }
                   setShowQrCode(true);
                 }}
                 className="p-1.5 text-slate-400 hover:text-white transition-colors rounded-md hover:bg-slate-700"
@@ -1578,17 +1586,70 @@ const SettingsModal = ({
   isOpen,
   onClose,
   config,
-  onSave
+  onSave,
+  onRefreshFiles
 }: {
   isOpen: boolean;
   onClose: () => void;
   config: IpResponse;
   onSave: (newConfig: Partial<IpResponse>) => void;
+  onRefreshFiles?: () => void;
 }) => {
   const [uploadDir, setUploadDir] = useState(config.upload_dir || '');
   const [mode, setMode] = useState(config.mode || 'share');
   const [allowRemoteGroupCreate, setAllowRemoteGroupCreate] = useState<boolean>(config.allow_remote_group_create ?? true);
   const [useSourceDate, setUseSourceDate] = useState<boolean>(config.use_source_date ?? false);
+  const [storage, setStorage] = useState<{ uploads_bytes: number; uploads_files: number; temp_bytes: number; temp_files: number } | null>(null);
+  const [cleanBusy, setCleanBusy] = useState('');
+  const [cleanMsg, setCleanMsg] = useState('');
+
+  const fmtBytes = (n: number) => {
+    if (!n) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = n;
+    let index = 0;
+    while (value >= 1024 && index < units.length - 1) {
+      value /= 1024;
+      index += 1;
+    }
+    return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+  };
+
+  const loadStorage = () => {
+    fetch('/api/storage')
+      .then(res => res.json())
+      .then(setStorage)
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      loadStorage();
+      setCleanMsg('');
+    }
+  }, [isOpen]);
+
+  const runCleanup = async (target: 'temp' | 'all') => {
+    if (target === 'all' && !window.confirm('将删除已上传的全部文件（含文本内容），且无法恢复，确定继续？')) return;
+    setCleanBusy(target);
+    setCleanMsg('');
+    try {
+      const res = await fetch('/api/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || '清理失败');
+      setCleanMsg(`已删除 ${data.removed_files} 个文件，释放 ${fmtBytes(data.freed_bytes)}`);
+      loadStorage();
+      onRefreshFiles?.();
+    } catch (e: any) {
+      setCleanMsg(e?.message || '清理失败');
+    } finally {
+      setCleanBusy('');
+    }
+  };
 
   useEffect(() => {
     setUploadDir(config.upload_dir || '');
@@ -1709,6 +1770,39 @@ const SettingsModal = ({
               </div>
               <span className="text-sm text-slate-700">上传图片时，尝试将文件的创建日期设置为 EXIF 拍摄时间</span>
             </div>
+          </div>
+
+          {/* Storage cleanup */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">存储与清理</label>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+              <div className="flex items-center justify-between text-xs text-slate-600">
+                <span>已上传文件</span>
+                <span className="font-mono">{storage ? `${storage.uploads_files} 个 · ${fmtBytes(storage.uploads_bytes)}` : '读取中…'}</span>
+              </div>
+              <div className="flex items-center justify-between text-xs text-slate-600">
+                <span>未完成分片缓存</span>
+                <span className="font-mono">{storage ? `${storage.temp_files} 个 · ${fmtBytes(storage.temp_bytes)}` : '读取中…'}</span>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={() => runCleanup('temp')}
+                  disabled={!!cleanBusy}
+                  className="flex-1 px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 disabled:opacity-50 transition-colors"
+                >
+                  {cleanBusy === 'temp' ? '清理中…' : '清理未完成分片'}
+                </button>
+                <button
+                  onClick={() => runCleanup('all')}
+                  disabled={!!cleanBusy}
+                  className="flex-1 px-3 py-2 text-xs font-medium text-red-600 bg-white border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 transition-colors"
+                >
+                  {cleanBusy === 'all' ? '清空中…' : '清空所有文件'}
+                </button>
+              </div>
+              {cleanMsg && <p className="text-xs text-slate-500 pt-1">{cleanMsg}</p>}
+            </div>
+            <p className="text-xs text-slate-500 mt-2 ml-1">清理在服务端执行，手机或电脑作为服务端时均有效。</p>
           </div>
         </div>
         <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
@@ -2639,6 +2733,7 @@ const Home = () => {
     if (isLoopback) {
       if (!config) return null;
       const ip = config.ip || '';
+      if (!ip) return '';
       const port = config.port;
       const proto = (config as any).proto ? `${(config as any).proto}:` : (wl ? wl.protocol : 'http:');
       const bracketed = ip.includes(':') && !ip.startsWith('[') ? `[${ip}]` : ip;
@@ -3212,6 +3307,7 @@ const Home = () => {
         onClose={() => setShowSettings(false)}
         config={config || { ip: '', port: 0 } as IpResponse}
         onSave={handleSaveConfig}
+        onRefreshFiles={fetchFiles}
       />
       <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-6 sm:pt-12">
 

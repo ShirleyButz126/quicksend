@@ -175,19 +175,20 @@ GLOBAL_PORT = 5000
 
 def _android_lan_ip_from_file():
     """Android：Java 层把「当前应展示的本机地址」写入 filesDir/lan_ip.txt
-    （开热点后是热点地址，关热点后回到 Wi-Fi 地址），这里每次读取以保持最新。"""
+    （开热点后是热点地址，关热点后回到 Wi-Fi 地址），这里每次读取以保持最新。
+    返回 None 表示没有该文件（启动早期），返回空字符串表示明确没有局域网地址（如只有流量）。"""
     root = os.environ.get('QUICKSEND_DATA_ROOT') or ''
     if not root:
         return None
     try:
         with open(os.path.join(root, 'lan_ip.txt'), 'r') as f:
             ip = f.read().strip()
-        parts = ip.split('.')
-        if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-            return ip
     except Exception:
-        pass
-    return None
+        return None
+    parts = ip.split('.')
+    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return ip
+    return ''
 
 
 def get_local_ip():
@@ -875,9 +876,12 @@ def api_ip():
             # 其它设备访问时，Host 头就是它实际连到的地址（Wi-Fi IP 或热点 IP），
             # 不能用启动时注入的旧地址覆盖；只有本机（127.0.0.1）访问才回填本机地址。
             if ip in ('127.0.0.1', 'localhost', '::1', '0.0.0.0', ''):
-                dyn_ip = _android_lan_ip_from_file() or env_ip
-                if dyn_ip:
-                    ip = dyn_ip
+                dyn_ip = _android_lan_ip_from_file()
+                if dyn_ip is None:
+                    # 还没有写过文件（启动早期），退回注入值
+                    dyn_ip = env_ip or ''
+                # 文件为空 = 当前没有局域网地址（例如只有流量），不能沿用旧地址
+                ip = dyn_ip
         elif env_ip:
             ip = env_ip
 
@@ -889,7 +893,8 @@ def api_ip():
         
         # Fix: If we are running locally and detected localhost/127.0.0.1, 
         # try to return the actual LAN IP so other devices can connect.
-        if ip in ('127.0.0.1', 'localhost', '::1'):
+        # Android 上由 Java 层写入/清空 lan_ip.txt 决定，不能再去猜网卡地址。
+        if not IS_ANDROID and ip in ('127.0.0.1', 'localhost', '::1'):
             lan_ip = get_local_ip_fast()
             if lan_ip and lan_ip != '127.0.0.1':
                 ip = lan_ip
@@ -1418,6 +1423,69 @@ def upload_complete():
     save_metadata(meta)
     log(f'[上传] 分片合并完成: {filename}, {merged_size} 字节, 账号: "{uploader}", 密码: {"已设置" if password else "未设置"}')
     return jsonify({'message': 'ok', 'saved': [filename], 'size': merged_size}), 201
+
+
+def _tree_stats(path):
+    total = 0
+    count = 0
+    if not os.path.isdir(path):
+        return 0, 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+                count += 1
+            except OSError:
+                pass
+    return total, count
+
+
+@app.route('/api/storage', methods=['GET'])
+def api_storage():
+    uploads_bytes, uploads_files = _tree_stats(app.config['UPLOAD_FOLDER'])
+    temp_bytes, temp_files = _tree_stats(UPLOAD_TMP_ROOT)
+    return jsonify({
+        'uploads_bytes': uploads_bytes,
+        'uploads_files': uploads_files,
+        'temp_bytes': temp_bytes,
+        'temp_files': temp_files,
+        'upload_dir': app.config['UPLOAD_FOLDER'],
+    })
+
+
+@app.route('/api/cleanup', methods=['POST'])
+def api_cleanup():
+    """批量清理：temp 只清未完成的分片临时文件，all 清空已上传文件（含元数据记录）。"""
+    data = request.get_json(silent=True) or {}
+    target = (data.get('target') or '').strip()
+    if target not in ('temp', 'all'):
+        return jsonify({'error': 'invalid target'}), 400
+    if target == 'temp':
+        freed, removed = _tree_stats(UPLOAD_TMP_ROOT)
+        shutil.rmtree(UPLOAD_TMP_ROOT, ignore_errors=True)
+    else:
+        upload_dir = app.config['UPLOAD_FOLDER']
+        freed, removed = _tree_stats(upload_dir)
+        if os.path.isdir(upload_dir):
+            for name in os.listdir(upload_dir):
+                p = os.path.join(upload_dir, name)
+                try:
+                    if os.path.isdir(p):
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        os.remove(p)
+                except OSError:
+                    pass
+        meta = load_metadata()
+        for key in list(meta.keys()):
+            if key.startswith('__'):
+                continue
+            meta.pop(key, None)
+        meta.pop('__texts__', None)
+        save_metadata(meta)
+        shutil.rmtree(UPLOAD_TMP_ROOT, ignore_errors=True)
+    log(f'[清理] target={target} 删除 {removed} 个文件，释放 {freed} 字节')
+    return jsonify({'ok': True, 'target': target, 'freed_bytes': freed, 'removed_files': removed})
 
 
 @app.route('/api/texts', methods=['GET','POST'])

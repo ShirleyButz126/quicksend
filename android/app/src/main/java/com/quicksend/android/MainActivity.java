@@ -12,10 +12,15 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
@@ -63,6 +68,10 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private String pendingUrl, pendingUserAgent, pendingContentDisposition, pendingMime, pendingName;
 
     private HotspotHelper hotspotHelper;
+
+    private final Handler networkHandler = new Handler(Looper.getMainLooper());
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private int networkChangeToken = 0;
 
     private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
         @Override
@@ -141,7 +150,67 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         }
 
         waitForServer();
+        registerNetworkMonitor();
         handleShareIntent(getIntent());
+    }
+
+    /** 监听默认网络切换（流量 <-> Wi-Fi <-> 网线），变化后重算本机地址并通知前端 */
+    private void registerNetworkMonitor() {
+        if (networkCallback != null) return;
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) return;
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                scheduleNetworkRefresh();
+            }
+
+            @Override
+            public void onLost(Network network) {
+                scheduleNetworkRefresh();
+            }
+
+            @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                scheduleNetworkRefresh();
+            }
+        };
+        try {
+            cm.registerDefaultNetworkCallback(networkCallback);
+        } catch (Exception e) {
+            Log.w("QuickSend", "注册网络监听失败: " + e.getMessage());
+            networkCallback = null;
+        }
+    }
+
+    private void unregisterNetworkMonitor() {
+        if (networkCallback == null) return;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) cm.unregisterNetworkCallback(networkCallback);
+        } catch (Exception ignored) {
+        }
+        networkCallback = null;
+    }
+
+    private void scheduleNetworkRefresh() {
+        final int token = ++networkChangeToken;
+        networkHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (token != networkChangeToken) return;
+                new Thread(() -> {
+                    publishLanIp();
+                    final String ip = hotspotHelper == null ? null : hotspotHelper.getLanIp();
+                    runOnUiThread(() -> {
+                        if (webView == null) return;
+                        webView.evaluateJavascript(
+                                "if(window.__quicksend&&window.__quicksend.onNetworkChange){"
+                                        + "window.__quicksend.onNetworkChange({ip:'" + jsEscape(ip) + "'});}", null);
+                    });
+                }, "quicksend-net-change").start();
+            }
+        }, 800);
     }
 
     @Override
@@ -284,7 +353,6 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 super.onPageFinished(view, url);
                 String title = view.getTitle();
                 Log.i("QuickSend", "WebView page finished: " + url + " title=" + title);
-                Toast.makeText(MainActivity.this, "页面加载完成: " + (title != null ? title : "(无标题)"), Toast.LENGTH_SHORT).show();
             }
         });
 
@@ -808,7 +876,6 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     }, "quicksend-home-diag").start();
 
                     splash.setVisibility(View.GONE);
-                    Toast.makeText(MainActivity.this, "服务就绪，加载页面…", Toast.LENGTH_SHORT).show();
                     publishLanIp();   // 服务起来后先同步一次本机地址给 Python
                     // Inject build number into JS globals so frontend can display version
                     String injectJs = "window.__QUICKSEND_BUILD__ = " + BuildConfig.BUILD_NUMBER + ";";
@@ -980,6 +1047,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         try {
             unregisterReceiver(shareDoneReceiver);
         } catch (IllegalArgumentException ignored) { }
+        unregisterNetworkMonitor();
         if (webView != null) {
             webView.destroy();
         }
