@@ -1,5 +1,6 @@
 import os
 import socket
+import shutil
 import sys
 import threading
 import time
@@ -1215,6 +1216,209 @@ def handle_files():
         if hidden_ids:
             files = [it for it in files if (it.get('group_id') or 'root') not in hidden_ids]
     return jsonify(files)
+
+# --- 分片上传（大文件 / 断点续传）---
+CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
+UPLOAD_TMP_ROOT = os.path.join(_DATA_ROOT, 'upload_tmp')
+_UPLOAD_ID_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-')
+
+
+def _valid_upload_id(value):
+    value = (value or '').strip()
+    if not (8 <= len(value) <= 64):
+        return None
+    if any(ch not in _UPLOAD_ID_CHARS for ch in value):
+        return None
+    return value
+
+
+def _upload_tmp_dir(upload_id):
+    return os.path.join(UPLOAD_TMP_ROOT, upload_id)
+
+
+def _received_chunks(upload_id):
+    d = _upload_tmp_dir(upload_id)
+    if not os.path.isdir(d):
+        return []
+    result = []
+    for name in os.listdir(d):
+        if name.endswith('.part'):
+            stem = name[:-5]
+            if stem.isdigit():
+                result.append(int(stem))
+    return sorted(result)
+
+
+def _safe_upload_name(raw_name):
+    base_name = os.path.basename(raw_name or '')
+    base_name = ''.join(ch for ch in base_name if ch not in '\\/:*?"<>|')
+    filename = base_name.strip()
+    if not filename or filename in ('.', '..'):
+        b, e = os.path.splitext(base_name)
+        ts = str(int(time.time() * 1000))
+        safe_base = (b or 'file_' + ts).strip() or ('file_' + ts)
+        safe_ext = e.replace('.', '')
+        filename = safe_base + (('.' + safe_ext) if safe_ext else '')
+    return filename
+
+
+def _cleanup_stale_uploads(max_age=24 * 3600):
+    try:
+        if not os.path.isdir(UPLOAD_TMP_ROOT):
+            return
+        now = time.time()
+        for name in os.listdir(UPLOAD_TMP_ROOT):
+            d = os.path.join(UPLOAD_TMP_ROOT, name)
+            if not os.path.isdir(d):
+                continue
+            newest = 0
+            try:
+                for entry in os.listdir(d):
+                    p = os.path.join(d, entry)
+                    if os.path.isfile(p):
+                        newest = max(newest, os.path.getmtime(p))
+            except Exception:
+                continue
+            if now - newest > max_age:
+                shutil.rmtree(d, ignore_errors=True)
+                log(f'[分片上传] 清理过期临时目录: {name}')
+    except Exception as e:
+        log(f'[分片上传] 清理临时目录失败: {e}')
+
+
+@app.route('/api/upload/init', methods=['POST'])
+def upload_init():
+    data = request.get_json(silent=True) or {}
+    upload_id = _valid_upload_id(data.get('upload_id'))
+    if not upload_id:
+        return jsonify({'error': 'invalid upload_id'}), 400
+    d = _upload_tmp_dir(upload_id)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception as e:
+        return jsonify({'error': f'创建临时目录失败: {e}'}), 500
+    try:
+        with open(os.path.join(d, 'meta.json'), 'w', encoding='utf-8') as f:
+            json.dump({
+                'filename': data.get('filename') or '',
+                'size': data.get('size') or 0,
+            }, f, ensure_ascii=False)
+    except Exception:
+        pass
+    _cleanup_stale_uploads()
+    return jsonify({
+        'upload_id': upload_id,
+        'chunk_size': CHUNK_SIZE,
+        'received': _received_chunks(upload_id),
+    })
+
+
+@app.route('/api/upload/status', methods=['GET'])
+def upload_status():
+    upload_id = _valid_upload_id(request.args.get('upload_id'))
+    if not upload_id:
+        return jsonify({'error': 'invalid upload_id'}), 400
+    received = _received_chunks(upload_id)
+    d = _upload_tmp_dir(upload_id)
+    received_bytes = 0
+    for idx in received:
+        try:
+            received_bytes += os.path.getsize(os.path.join(d, f'{idx}.part'))
+        except OSError:
+            pass
+    return jsonify({
+        'upload_id': upload_id,
+        'received': received,
+        'received_bytes': received_bytes,
+        'chunk_size': CHUNK_SIZE,
+    })
+
+
+@app.route('/api/upload/chunk', methods=['POST'])
+def upload_chunk():
+    upload_id = _valid_upload_id(request.form.get('upload_id'))
+    if not upload_id:
+        return jsonify({'error': 'invalid upload_id'}), 400
+    try:
+        index = int(request.form.get('index', '-1'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid index'}), 400
+    if index < 0:
+        return jsonify({'error': 'invalid index'}), 400
+    part = request.files.get('chunk')
+    if not part:
+        return jsonify({'error': 'missing chunk'}), 400
+    d = _upload_tmp_dir(upload_id)
+    try:
+        os.makedirs(d, exist_ok=True)
+        final_path = os.path.join(d, f'{index}.part')
+        tmp_path = final_path + '.tmp'
+        part.save(tmp_path)
+        os.replace(tmp_path, final_path)
+    except Exception as e:
+        log(f'[分片上传] 写入分片失败 {upload_id}#{index}: {e}')
+        return jsonify({'error': str(e)}), 500
+    return jsonify({'ok': True, 'index': index})
+
+
+@app.route('/api/upload/complete', methods=['POST'])
+def upload_complete():
+    data = request.get_json(silent=True) or {}
+    upload_id = _valid_upload_id(data.get('upload_id'))
+    if not upload_id:
+        return jsonify({'error': 'invalid upload_id'}), 400
+    d = _upload_tmp_dir(upload_id)
+    received = _received_chunks(upload_id)
+    if not received:
+        return jsonify({'error': 'no chunks'}), 400
+    expected = list(range(received[-1] + 1))
+    if received != expected:
+        missing = sorted(set(expected) - set(received))
+        return jsonify({'error': 'missing chunks', 'missing': missing}), 409
+
+    expected_size = int(data.get('size') or 0)
+    uploader = data.get('uploader') or ''
+    password = data.get('password') or ''
+    group_id = (data.get('group_id') or 'root').strip() or 'root'
+    filename = _safe_upload_name(data.get('filename') or '')
+
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    merged_size = 0
+    try:
+        with open(save_path, 'wb') as out:
+            for idx in received:
+                part_path = os.path.join(d, f'{idx}.part')
+                with open(part_path, 'rb') as fin:
+                    shutil.copyfileobj(fin, out, 1024 * 1024)
+                merged_size += os.path.getsize(part_path)
+    except Exception as e:
+        log(f'[分片上传] 合并失败 {upload_id}: {e}')
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+        return jsonify({'error': f'合并失败: {e}'}), 500
+
+    if expected_size and merged_size != expected_size:
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+        return jsonify({'error': f'size mismatch: {merged_size} != {expected_size}'}), 400
+
+    shutil.rmtree(d, ignore_errors=True)
+    if _config.get('use_source_date'):
+        apply_exif_date(save_path)
+    meta = load_metadata()
+    entry = {'uploader': uploader, 'password_hash': None, 'group_id': group_id}
+    if password:
+        entry['password_hash'] = _generate_password_hash(password)
+    meta[filename] = entry
+    save_metadata(meta)
+    log(f'[上传] 分片合并完成: {filename}, {merged_size} 字节, 账号: "{uploader}", 密码: {"已设置" if password else "未设置"}')
+    return jsonify({'message': 'ok', 'saved': [filename], 'size': merged_size}), 201
+
 
 @app.route('/api/texts', methods=['GET','POST'])
 def handle_texts():

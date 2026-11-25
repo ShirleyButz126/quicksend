@@ -52,6 +52,7 @@ import { FileItem, IpResponse, TextItem, GroupItem } from '../../types';
 import { useTranslation } from 'react-i18next';
 import { initTCB, recordInstall, recordDailyActive, recordFileStats } from '../utils/tcb';
 import { Globe } from 'lucide-react';
+import JSZip from 'jszip';
 
 // --- Utility Functions ---
 
@@ -75,6 +76,143 @@ const formatSize = (bytes: number): string => {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
+
+// --- 分片上传（4MB/片，3 并发，失败重试，断点续传）---
+const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;
+const UPLOAD_CHUNK_CONCURRENCY = 3;
+const UPLOAD_FILE_CONCURRENCY = 2;
+const UPLOAD_MAX_RETRY = 3;
+
+type UploadTask = {
+  id: string;
+  name: string;
+  size: number;
+  loaded: number;
+  status: 'waiting' | 'uploading' | 'done' | 'error';
+  message?: string;
+};
+
+// 由「文件名 + 大小 + 修改时间」算稳定 id，刷新页面后仍能识别同一文件并续传
+const makeUploadId = (file: File): string => {
+  const raw = `${file.name}|${file.size}|${file.lastModified}`;
+  let h1 = 0x811c9dc5;
+  let h2 = 5381;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i);
+    h1 = ((h1 ^ c) * 16777619) >>> 0;
+    h2 = ((h2 * 33) ^ c) >>> 0;
+  }
+  return `u${h1.toString(36)}${h2.toString(36)}${file.size.toString(36)}`;
+};
+
+const putChunk = (
+  uploadId: string,
+  index: number,
+  blob: Blob,
+  onProgress: (loaded: number) => void
+): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append('upload_id', uploadId);
+    fd.append('index', String(index));
+    fd.append('chunk', blob, 'chunk');
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload/chunk', true);
+    xhr.timeout = 180000;
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`分片 ${index} 失败(HTTP ${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error(`分片 ${index} 网络错误`));
+    xhr.ontimeout = () => reject(new Error(`分片 ${index} 超时`));
+    xhr.send(fd);
+  });
+};
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+type UploadFileOptions = {
+  uploader: string;
+  password?: string;
+  groupId: string;
+  onProgress: (loaded: number) => void;
+};
+
+// 单文件分片上传：先查已收到的分片，只补传缺失部分
+const uploadFileChunked = async (file: File, opts: UploadFileOptions): Promise<void> => {
+  const uploadId = makeUploadId(file);
+  const initRes = await fetch('/api/upload/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ upload_id: uploadId, filename: file.name, size: file.size }),
+  });
+  if (!initRes.ok) throw new Error('初始化上传失败');
+  const init = await initRes.json();
+  const received: number[] = Array.isArray(init.received) ? init.received : [];
+
+  const totalChunks = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK_SIZE));
+  const receivedSet = new Set(received);
+  const chunkLoaded: number[] = new Array(totalChunks).fill(0);
+  const chunkSizeOf = (idx: number) => Math.min(UPLOAD_CHUNK_SIZE, file.size - idx * UPLOAD_CHUNK_SIZE);
+  receivedSet.forEach(idx => {
+    if (idx >= 0 && idx < totalChunks) chunkLoaded[idx] = chunkSizeOf(idx);
+  });
+  const report = () => opts.onProgress(chunkLoaded.reduce((a, b) => a + b, 0));
+  report();
+
+  const pending: number[] = [];
+  for (let i = 0; i < totalChunks; i++) {
+    if (!receivedSet.has(i)) pending.push(i);
+  }
+
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < pending.length) {
+      const idx = pending[cursor++];
+      const start = idx * UPLOAD_CHUNK_SIZE;
+      const blob = file.slice(start, Math.min(start + UPLOAD_CHUNK_SIZE, file.size));
+      let attempt = 0;
+      for (;;) {
+        try {
+          await putChunk(uploadId, idx, blob, (loaded) => {
+            chunkLoaded[idx] = Math.min(loaded, chunkSizeOf(idx));
+            report();
+          });
+          chunkLoaded[idx] = chunkSizeOf(idx);
+          report();
+          break;
+        } catch (err) {
+          attempt += 1;
+          chunkLoaded[idx] = 0;
+          report();
+          if (attempt >= UPLOAD_MAX_RETRY) throw err;
+          await delay(1000 * attempt);
+        }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(UPLOAD_CHUNK_CONCURRENCY, pending.length) }, worker));
+
+  const doneRes = await fetch('/api/upload/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      upload_id: uploadId,
+      filename: file.name,
+      size: file.size,
+      uploader: opts.uploader,
+      password: opts.password || '',
+      group_id: opts.groupId,
+    }),
+  });
+  if (!doneRes.ok) {
+    const body = await doneRes.json().catch(() => ({} as any));
+    throw new Error(body?.error || '合并分片失败');
+  }
 };
 
 const formatDate = (timestamp: number): string => {
@@ -904,12 +1042,15 @@ const UserProfileCard = ({
   );
 };
 
-const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, isLoggedIn, onLoginRequired, groups, selectedGroupId, onChangeGroup }: { onUpload: (files: FileList, password?: string, groupId?: string) => void, onShareText?: (content: string, password?: string) => void, isUploading: boolean, progress: number, isLoggedIn: boolean, onLoginRequired: () => void, groups: GroupItem[], selectedGroupId: string, onChangeGroup: (id: string) => void }) => {
+const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, tasks = [], isLoggedIn, onLoginRequired, groups, selectedGroupId, onChangeGroup }: { onUpload: (files: FileList | File[], password?: string, groupId?: string) => void, onShareText?: (content: string, password?: string) => void, isUploading: boolean, progress: number, tasks?: UploadTask[], isLoggedIn: boolean, onLoginRequired: () => void, groups: GroupItem[], selectedGroupId: string, onChangeGroup: (id: string) => void }) => {
   const [mode, setMode] = useState<'file' | 'text'>('file');
   const [isDragOver, setIsDragOver] = useState(false);
   const [password, setPassword] = useState('');
   const [textContent, setTextContent] = useState('');
+  const [isZipping, setIsZipping] = useState(false);
+  const [zipPercent, setZipPercent] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dirInputRef = useRef<HTMLInputElement>(null);
   const [groupId, setGroupId] = useState<string>(selectedGroupId || 'root');
   useEffect(() => { setGroupId(selectedGroupId || 'root'); }, [selectedGroupId]);
 
@@ -925,6 +1066,38 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
     if (e.target.files && e.target.files.length > 0) {
       onUpload(e.target.files, password, groupId);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // 选择文件夹 → 浏览器内打成 zip（不压缩，只打包）再走分片上传
+  const handleDirSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = e.target.files ? Array.from(e.target.files) : [];
+    if (dirInputRef.current) dirInputRef.current.value = '';
+    if (!picked.length) return;
+    const totalSize = picked.reduce((sum, f) => sum + f.size, 0);
+    if (totalSize > 1.5 * 1024 * 1024 * 1024) {
+      alert('文件夹大于 1.5GB，手机内存可能不够打包，建议在电脑上先压缩成 zip 再上传');
+      return;
+    }
+    setIsZipping(true);
+    setZipPercent(0);
+    try {
+      const zip = new JSZip();
+      picked.forEach(f => {
+        const rel = (f as any).webkitRelativePath || f.name;
+        zip.file(rel, f);
+      });
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }, (meta) => {
+        setZipPercent(meta.percent);
+      });
+      const rootName = (((picked[0] as any).webkitRelativePath || '').split('/')[0]) || 'folder';
+      const zipFile = new window.File([blob], `${rootName}.zip`, { type: 'application/zip', lastModified: Date.now() });
+      onUpload([zipFile], password, groupId);
+    } catch (err: any) {
+      alert('打包失败：' + (err?.message || '未知错误'));
+    } finally {
+      setIsZipping(false);
+      setZipPercent(0);
     }
   };
 
@@ -961,19 +1134,40 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
         onDrop={handleDrop}
       >
         {mode === 'file' ? (
-          isUploading ? (
-            <div className="w-full px-6 flex flex-col items-center animate-fade-in">
-              <div className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center mb-3 shadow-sm">
-                <div className="w-4 h-4 border-2 border-slate-800 border-t-transparent rounded-full animate-spin"></div>
+          (isUploading || tasks.length > 0) ? (
+            <div className="w-full px-5 flex flex-col animate-fade-in">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-sm font-semibold text-slate-800">{isUploading ? '正在传输...' : '传输结束'}</p>
+                <span className="text-xs font-mono text-slate-400">{Math.round(progress)}%</span>
               </div>
-              <p className="text-sm font-semibold text-slate-800 mb-2">正在传输...</p>
               <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-slate-900 transition-all duration-300 ease-out rounded-full"
                   style={{ width: `${progress}%` }}
                 />
               </div>
-              <p className="text-xs text-slate-400 mt-2 font-mono">{Math.round(progress)}%</p>
+              <div className="w-full mt-3 max-h-44 overflow-y-auto space-y-2">
+                {tasks.map(t => {
+                  const pct = t.size ? Math.min(100, (t.loaded / t.size) * 100) : 100;
+                  return (
+                    <div key={t.id} className="text-[11px]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-slate-700">{t.name}</span>
+                        <span className={`shrink-0 font-mono ${t.status === 'error' ? 'text-rose-500' : t.status === 'done' ? 'text-emerald-600' : 'text-slate-400'}`}>
+                          {t.status === 'done' ? '完成' : t.status === 'error' ? (t.message || '失败') : `${Math.round(pct)}%`}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1 bg-slate-200 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${t.status === 'error' ? 'bg-rose-400' : t.status === 'done' ? 'bg-emerald-500' : 'bg-slate-800'}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-slate-400 mt-2">分片 4MB · 断点续传 · 可同时传多个文件</p>
             </div>
           ) : (
             <div className="flex flex-col items-center text-center w-full px-4">
@@ -981,7 +1175,7 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
                 <Upload size={20} strokeWidth={1.5} />
               </div>
               <h3 className="text-sm font-semibold text-slate-800">点击或拖拽上传</h3>
-              <p className="text-xs text-slate-400 mb-5">支持任意文件格式</p>
+              <p className="text-xs text-slate-400 mb-5">支持大文件、断点续传、文件夹打包</p>
       <div className="w-full space-y-2">
                 <div className="relative">
                   <select
@@ -1015,6 +1209,14 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
                 >
                   选择文件
                 </button>
+                <button
+                  onClick={() => dirInputRef.current?.click()}
+                  disabled={isZipping}
+                  className="w-full py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-md text-xs font-semibold shadow-sm transition-all flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <Folder size={13} />
+                  {isZipping ? `打包中 ${Math.round(zipPercent)}%` : '选择文件夹（自动打包 zip）'}
+                </button>
               </div>
               <input
                 ref={fileInputRef}
@@ -1022,6 +1224,13 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
                 multiple
                 className="hidden"
                 onChange={handleFileSelect}
+              />
+              <input
+                ref={dirInputRef}
+                type="file"
+                className="hidden"
+                onChange={handleDirSelect}
+                {...({ webkitdirectory: '', directory: '' } as any)}
               />
             </div>
           )
@@ -2338,6 +2547,7 @@ const Home = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
   const [activeTab, setActiveTab] = useState<'files' | 'text'>('files');
   const [groups, setGroups] = useState<GroupItem[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string>('root');
@@ -2587,56 +2797,73 @@ const Home = () => {
     }
   };
 
-  const handleUpload = (fileList: FileList, password?: string, groupIdOverride?: string) => {
-    const formData = new FormData();
-    for (let i = 0; i < fileList.length; i++) {
-      formData.append('file', fileList[i]);
-    }
-    // If logged in, use username. If not, use '访客' or similar, or just send empty and let backend decide.
-    // But requirement says: "Default login last logged-in local name".
-    // If not logged in, we still might want to attribute it to a name if they set one?
-    // The prompt says: "If not logged in, cannot set file/text access password".
-    // It doesn't say they cannot upload.
-    // We'll send username if available, or empty.
-    formData.append('uploader', username || '访客');
-    formData.append('group_id', (groupIdOverride || activeGroupId || 'root'));
-    if (password) formData.append('password', password);
+  const handleUpload = async (input: FileList | File[], password?: string, groupIdOverride?: string) => {
+    const list = Array.from(input || []).filter(Boolean);
+    if (!list.length) return;
 
+    const totalBytes = list.reduce((sum, f) => sum + f.size, 0);
+    const loadedByFile = new Array(list.length).fill(0);
+    const tasks: UploadTask[] = list.map(f => ({
+      id: makeUploadId(f),
+      name: f.name,
+      size: f.size,
+      loaded: 0,
+      status: 'waiting' as const,
+    }));
+
+    setUploadTasks(tasks);
     setIsUploading(true);
     setUploadProgress(0);
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/files', true);
+    const updateOverall = () => {
+      const loaded = loadedByFile.reduce((a, b) => a + b, 0);
+      setUploadProgress(totalBytes ? (loaded / totalBytes) * 100 : 100);
+      setUploadTasks(prev => prev.map((t, i) => ({ ...t, loaded: loadedByFile[i] })));
+    };
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        const percent = (e.loaded / e.total) * 100;
-        setUploadProgress(percent);
+    let successCount = 0;
+    let failedCount = 0;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < list.length) {
+        const idx = cursor++;
+        const file = list[idx];
+        setUploadTasks(prev => prev.map((t, i) => (i === idx ? { ...t, status: 'uploading' } : t)));
+        try {
+          await uploadFileChunked(file, {
+            uploader: username || '访客',
+            password,
+            groupId: groupIdOverride || activeGroupId || 'root',
+            onProgress: (loaded) => {
+              loadedByFile[idx] = loaded;
+              updateOverall();
+            },
+          });
+          loadedByFile[idx] = file.size;
+          successCount += 1;
+          setUploadTasks(prev => prev.map((t, i) => (i === idx ? { ...t, status: 'done', loaded: file.size } : t)));
+        } catch (err: any) {
+          failedCount += 1;
+          setUploadTasks(prev => prev.map((t, i) => (i === idx
+            ? { ...t, status: 'error', loaded: loadedByFile[idx], message: err?.message || '上传失败' }
+            : t)));
+        }
+        updateOverall();
       }
     };
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_FILE_CONCURRENCY, list.length) }, worker));
 
-    xhr.onload = () => {
-      setIsUploading(false);
-      if (xhr.status === 201) {
-        // Record stats
-        let totalSize = 0;
-        for (let i = 0; i < fileList.length; i++) totalSize += fileList[i].size;
-        recordFileStats('upload', fileList.length, totalSize);
-
-        fetchFiles();
-        // Clear progress after short delay for better UX
-        setTimeout(() => setUploadProgress(0), 500);
-      } else {
-        showToast('上传失败', 'error');
-      }
-    };
-
-    xhr.onerror = () => {
-      setIsUploading(false);
-      showToast('网络错误', 'error');
-    };
-
-    xhr.send(formData);
+    setIsUploading(false);
+    if (successCount) {
+      recordFileStats('upload', successCount, totalBytes);
+      fetchFiles();
+    }
+    if (failedCount) {
+      showToast(`${failedCount} 个文件上传失败，重新选择同一文件可续传`, 'error');
+    } else {
+      showToast('上传完成', 'success');
+      setTimeout(() => setUploadTasks([]), 3000);
+    }
   };
 
   const handleShareText = async (content: string, password?: string) => {
@@ -2963,6 +3190,7 @@ const Home = () => {
                 onShareText={handleShareText}
                 isUploading={isUploading}
                 progress={uploadProgress}
+                tasks={uploadTasks}
                 isLoggedIn={isLoggedIn}
                 onLoginRequired={() => setShowAuthModal(true)}
                 groups={groups}
