@@ -40,6 +40,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.List;
 
 public class MainActivity extends Activity implements HotspotHelper.HotspotStateListener {
@@ -73,6 +74,21 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         }
     };
 
+    private final BroadcastReceiver shareDoneReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            int ok = intent.getIntExtra("ok", 0);
+            int failed = intent.getIntExtra("failed", 0);
+            String error = intent.getStringExtra("error");
+            if (ok > 0 && webView != null) {
+                webView.reload();
+            }
+            String msg = "分享导入完成：成功 " + ok + (failed > 0 ? "，失败 " + failed : "");
+            if (failed > 0 && error != null) msg += "\n" + error;
+            Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -99,8 +115,11 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         IntentFilter downloadFilter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(downloadReceiver, downloadFilter, Context.RECEIVER_EXPORTED);
+            registerReceiver(shareDoneReceiver, new IntentFilter(QuickSendService.ACTION_SHARE_DONE),
+                    Context.RECEIVER_NOT_EXPORTED);
         } else {
             registerReceiver(downloadReceiver, downloadFilter);
+            registerReceiver(shareDoneReceiver, new IntentFilter(QuickSendService.ACTION_SHARE_DONE));
         }
 
         if (Build.VERSION.SDK_INT >= 33
@@ -122,6 +141,88 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         }
 
         waitForServer();
+        handleShareIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleShareIntent(intent);
+    }
+
+    /** 处理系统「分享到」「用其他应用打开」进来的文件，交给前台服务分片上传 */
+    private void handleShareIntent(Intent intent) {
+        if (intent == null) return;
+        List<Uri> uris = extractShareUris(intent);
+        if (uris.isEmpty()) {
+            CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+            if (text != null && text.length() > 0) {
+                Uri saved = writeSharedTextToCache(text);
+                if (saved != null) uris.add(saved);
+            }
+        }
+        // 清空 action，避免 Activity 重建（如旋转屏幕）时重复导入
+        intent.setAction(null);
+        if (uris.isEmpty()) return;
+
+        Intent serviceIntent = new Intent(this, QuickSendService.class);
+        serviceIntent.setAction(QuickSendService.ACTION_SHARE_UPLOAD);
+        serviceIntent.putParcelableArrayListExtra(QuickSendService.EXTRA_URIS, new ArrayList<>(uris));
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(serviceIntent);
+            } else {
+                startService(serviceIntent);
+            }
+        } catch (Exception e) {
+            Log.e("QuickSend", "分享导入启动失败", e);
+            Toast.makeText(this, "导入失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+            return;
+        }
+        Toast.makeText(this, "正在导入 " + uris.size() + " 个文件…", Toast.LENGTH_SHORT).show();
+    }
+
+    @SuppressWarnings("deprecation")
+    private List<Uri> extractShareUris(Intent intent) {
+        List<Uri> uris = new ArrayList<>();
+        String action = intent.getAction();
+        if (Intent.ACTION_SEND.equals(action)) {
+            Uri uri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (uri != null) uris.add(uri);
+        } else if (Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+            ArrayList<Uri> list = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (list != null) {
+                for (Uri uri : list) {
+                    if (uri != null) uris.add(uri);
+                }
+            }
+        } else if (Intent.ACTION_VIEW.equals(action)) {
+            if (intent.getData() != null) uris.add(intent.getData());
+        }
+        if (uris.isEmpty() && intent.getClipData() != null) {
+            ClipData clip = intent.getClipData();
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri uri = clip.getItemAt(i).getUri();
+                if (uri != null) uris.add(uri);
+            }
+        }
+        return uris;
+    }
+
+    private Uri writeSharedTextToCache(CharSequence text) {
+        try {
+            File dir = new File(getCacheDir(), "shared");
+            if (!dir.exists() && !dir.mkdirs()) return null;
+            File file = new File(dir, "分享文本_" + System.currentTimeMillis() + ".txt");
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(file)) {
+                out.write(text.toString().getBytes("UTF-8"));
+            }
+            return Uri.fromFile(file);
+        } catch (Exception e) {
+            Log.e("QuickSend", "保存分享文本失败", e);
+            return null;
+        }
     }
 
     private void setupWebView() {
@@ -875,6 +976,9 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     protected void onDestroy() {
         try {
             unregisterReceiver(downloadReceiver);
+        } catch (IllegalArgumentException ignored) { }
+        try {
+            unregisterReceiver(shareDoneReceiver);
         } catch (IllegalArgumentException ignored) { }
         if (webView != null) {
             webView.destroy();
