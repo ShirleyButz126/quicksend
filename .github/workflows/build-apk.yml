@@ -46,24 +46,33 @@ jobs:
 
       - name: Prepare fixed signing key
         env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_B64_ALT: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KS_PWD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_PWD_ALT: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_ALIAS_ALT: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KS_KEYPWD: ${{ secrets.KEY_PASSWORD }}
+          KS_KEYPWD_ALT: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "KEYSTORE_BASE64 未配置，沿用 Android 默认 debug 签名"
+          # 兼容两套命名：KEYSTORE_* 与 RELEASE_KEYSTORE_*
+          BASE64_VALUE="${KS_B64:-$KS_B64_ALT}"
+          STORE_PASSWORD="${KS_PWD:-$KS_PWD_ALT}"
+          ALIAS_VALUE="${KS_ALIAS:-$KS_ALIAS_ALT}"
+          KEYPWD_VALUE="${KS_KEYPWD:-$KS_KEYPWD_ALT}"
+          if [ -z "$BASE64_VALUE" ]; then
+            echo "未找到 keystore Secret，沿用 Android 默认 debug 签名（签名会随每次构建变化）"
             exit 0
           fi
-          echo "$KEYSTORE_BASE64" | base64 -d > android/app/fixed-debug.keystore
+          echo "$BASE64_VALUE" | base64 -d > android/app/fixed-debug.keystore
           {
             echo "storeFile=fixed-debug.keystore"
-            echo "storePassword=$KEYSTORE_PASSWORD"
-            echo "keyAlias=$KEY_ALIAS"
-            echo "keyPassword=$KEY_PASSWORD"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$ALIAS_VALUE"
+            echo "keyPassword=$KEYPWD_VALUE"
             echo "storeType=pkcs12"
           } > android/app/keystore.properties
-          echo "已写入固定签名配置"
+          echo "已写入固定签名配置（alias=$ALIAS_VALUE）"
 
       - name: Build debug APK
         run: gradle -p android assembleDebug --no-daemon --stacktrace
