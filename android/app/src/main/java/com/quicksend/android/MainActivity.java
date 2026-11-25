@@ -683,9 +683,15 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     /** 当前热点/本机地址写给 Python（filesDir/lan_ip.txt），/api/ip 会动态读取 */
     private void publishLanIp() {
         String ip = hotspotHelper == null ? null : hotspotHelper.getLanIp();
-        try (java.io.FileWriter w = new java.io.FileWriter(new File(getFilesDir(), "lan_ip.txt"), false)) {
-            w.write(ip == null ? "" : ip);
-            Log.i("QuickSend", "publishLanIp: " + ip);
+        // 必须和 Python 的 QUICKSEND_DATA_ROOT 一致：Service 传给 Python 的是 getExternalFilesDir(null)
+        File dir = getExternalFilesDir(null);
+        if (dir == null) dir = getFilesDir();
+        try {
+            if (!dir.exists()) dir.mkdirs();
+            try (java.io.FileWriter w = new java.io.FileWriter(new File(dir, "lan_ip.txt"), false)) {
+                w.write(ip == null ? "" : ip);
+            }
+            Log.i("QuickSend", "publishLanIp: " + ip + " -> " + dir);
         } catch (Exception e) {
             Log.w("QuickSend", "publishLanIp failed: " + e.getMessage());
         }
