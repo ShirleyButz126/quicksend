@@ -438,10 +438,22 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     break;
                 case "stop":
                     result = hotspotHelper.stopHotspot();
+                    if (!result.startsWith("error:")) {
+                        // 关闭后地址回到 Wi-Fi 地址，直接推给前端，避免被下面的 'ok' 误判成已开启
+                        publishLanIp();
+                        if (webView != null) {
+                            webView.evaluateJavascript(
+                                    "__quicksend.onHotspotState({state:'stopped', ip:'"
+                                            + jsEscape(hotspotHelper.getLanIp())
+                                            + "', ssid:'', password:'', active:false})", null);
+                        }
+                        return;
+                    }
                     break;
                 case "status":
-                    result = (hotspotHelper.isStarting() ? "starting" : "idle") + ":" + hotspotHelper.getLanIp();
-                    break;
+                    // 页面刷新后恢复热点状态（SSID/密码/地址），并让前端拿到最新地址
+                    sendHotspotStatus();
+                    return;
                 default:
                     result = "error:unknown_action:" + action;
             }
@@ -456,12 +468,41 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 showHotspotFallbackDialog(errMsg);
                 return;
             }
-            String lanIp = hotspotHelper.getLanIp();
+            String lanIp = hotspotHelper.getHotspotIp();
             webView.evaluateJavascript(
                     "__quicksend.onHotspotResult({ip:'" + (lanIp != null ? lanIp : "") + "', status:'" + result.replace("'", "\\'") + "'})",
                     null);
         } catch (Exception e) {
             webView.evaluateJavascript("__quicksend.onHotspotResult({error:'" + e.getMessage().replace("'", "\\'") + "'})", null);
+        }
+    }
+
+    /** 当前热点/本机地址写给 Python（filesDir/lan_ip.txt），/api/ip 会动态读取 */
+    private void publishLanIp() {
+        String ip = hotspotHelper == null ? null : hotspotHelper.getLanIp();
+        try (java.io.FileWriter w = new java.io.FileWriter(new File(getFilesDir(), "lan_ip.txt"), false)) {
+            w.write(ip == null ? "" : ip);
+            Log.i("QuickSend", "publishLanIp: " + ip);
+        } catch (Exception e) {
+            Log.w("QuickSend", "publishLanIp failed: " + e.getMessage());
+        }
+    }
+
+    /** 把当前热点状态推给前端（页面刷新后也能恢复卡片状态） */
+    private void sendHotspotStatus() {
+        boolean active = hotspotHelper != null && hotspotHelper.isHotspotActive();
+        String state = active ? "started"
+                : (hotspotHelper != null && hotspotHelper.isStarting() ? "starting" : "idle");
+        String ip = active ? hotspotHelper.getHotspotIp() : hotspotHelper.getLanIp();
+        String ssid = hotspotHelper != null ? jsEscape(hotspotHelper.getHotspotSsid()) : "";
+        String pwd = hotspotHelper != null ? jsEscape(hotspotHelper.getHotspotPassword()) : "";
+        Log.i("QuickSend", "status: state=" + state + " ip=" + ip + " ssid=" + ssid);
+        publishLanIp();
+        if (webView != null) {
+            webView.evaluateJavascript(
+                    "__quicksend.onHotspotState({state:'" + state + "', ip:'" + jsEscape(ip)
+                            + "', ssid:'" + ssid + "', password:'" + pwd + "', active:" + active + "})",
+                    null);
         }
     }
 
@@ -495,9 +536,11 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             if (webView != null) {
                 String ssid = hotspotHelper != null ? jsEscape(hotspotHelper.getHotspotSsid()) : "";
                 String pwd = hotspotHelper != null ? jsEscape(hotspotHelper.getHotspotPassword()) : "";
+                // 热点启动/停止都会改变本机可用地址，同步给 Python 供 /api/ip 使用
+                publishLanIp();
                 webView.evaluateJavascript(
                         "__quicksend.onHotspotState({state:'" + jsEscape(state) + "', ip:'" + jsEscape(lanIp)
-                                + "', ssid:'" + ssid + "', password:'" + pwd + "'})",
+                                + "', ssid:'" + ssid + "', password:'" + pwd + "', active:" + state.startsWith("started") + "})",
                         null);
             }
         });
@@ -665,6 +708,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
                     splash.setVisibility(View.GONE);
                     Toast.makeText(MainActivity.this, "服务就绪，加载页面…", Toast.LENGTH_SHORT).show();
+                    publishLanIp();   // 服务起来后先同步一次本机地址给 Python
                     // Inject build number into JS globals so frontend can display version
                     String injectJs = "window.__QUICKSEND_BUILD__ = " + BuildConfig.BUILD_NUMBER + ";";
                     String loadUrl = "http://127.0.0.1:" + PORT + "/";
@@ -781,7 +825,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     showHotspotFallbackDialog(errMsg);
                 } else {
                     // "starting" or "ok" → 正常路径，等 LocalOnlyHotspot 回调
-                    String lanIp = hotspotHelper.getLanIp();
+                    String lanIp = hotspotHelper.getHotspotIp();
                     if (webView != null) {
                         webView.evaluateJavascript(
                                 "__quicksend.onHotspotResult({ip:'" + (lanIp != null ? lanIp : "") + "', status:'" + result.replace("'", "\\'") + "'})",

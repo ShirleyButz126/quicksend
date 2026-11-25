@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiManager.LocalOnlyHotspotCallback;
 import android.net.wifi.WifiManager.LocalOnlyHotspotReservation;
@@ -17,6 +18,8 @@ import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * HotspotHelper: Manage Android WiFi hotspot for QuickSend (no-WiFi file transfer).
@@ -36,6 +39,8 @@ public class HotspotHelper {
     // LocalOnlyHotspot 的 SSID/密码是系统随机生成的，必须回传给前端展示
     private volatile String hotspotSsid = "";
     private volatile String hotspotPassword = "";
+    // 开热点前的「网卡名|IP」快照：开完后用 diff 找出真正新建的 AP 网卡地址
+    private volatile Map<String, String> ipSnapshotBeforeStart = Collections.emptyMap();
 
     // Static holder: MainActivity sets this in onCreate
     public static volatile HotspotStateListener stateListener;
@@ -102,33 +107,95 @@ public class HotspotHelper {
 
     /**
      * 只返回热点网卡（ap0 / swlan0 / wlan1 等）的私有地址。
-     * 之前直接取"第一个非 loopback 地址"，WiFi 关闭时会拿到流量网卡地址（运营商 IP）。
+     * 关键：必须排除「当前 Wi-Fi 客户端地址」，否则"连着 Wi-Fi 时开热点"
+     * 会把家里路由器的 Wi-Fi 地址误当成热点地址显示出来。
      */
     public String getHotspotIp() {
+        String wifiIp = currentWifiClientIp();
+        String fallback = null;
         try {
-            String fallback = null;
             Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
             for (NetworkInterface netint : Collections.list(nets)) {
                 if (!netint.isUp() || netint.isLoopback()) continue;
                 String name = netint.getName().toLowerCase();
-                if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("wwan")
-                        || name.startsWith("pdp") || name.startsWith("clat") || name.startsWith("tun")
-                        || name.startsWith("dummy") || name.startsWith("p2p") || name.startsWith("ppp")) {
-                    continue;  // 流量 / VPN 网卡，直接排除
-                }
-                boolean apLike = name.startsWith("ap") || name.contains("softap")
-                        || name.startsWith("swlan") || name.startsWith("wlan1") || name.startsWith("wlan2");
+                if (isExcludedInterface(name)) continue;      // 流量 / VPN 网卡，直接排除
+                boolean apLike = isApLikeInterface(name);
                 for (InetAddress addr : Collections.list(netint.getInetAddresses())) {
                     if (!(addr instanceof Inet4Address) || addr.isLoopbackAddress()) continue;
                     String ip = addr.getHostAddress();
                     if (!isPrivateIpv4(ip)) continue;
+                    if (wifiIp != null && wifiIp.equals(ip)) continue;   // Wi-Fi 客户端地址，不是热点
+                    // 开热点前就存在的同网卡同地址 → 不是本次热点新建的地址
+                    if (!apLike && ipSnapshotBeforeStart.containsKey(name + "|" + ip)) continue;
                     if (apLike) return ip;
                     if (fallback == null) fallback = ip;
                 }
             }
-            return fallback;
         } catch (Exception ignored) {
             return null;
+        }
+        return fallback;
+    }
+
+    private static boolean isExcludedInterface(String name) {
+        return name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("wwan")
+                || name.startsWith("pdp") || name.startsWith("clat") || name.startsWith("tun")
+                || name.startsWith("dummy") || name.startsWith("p2p") || name.startsWith("ppp");
+    }
+
+    private static boolean isApLikeInterface(String name) {
+        return name.startsWith("ap") || name.contains("softap")
+                || name.startsWith("swlan") || name.startsWith("wlan1") || name.startsWith("wlan2");
+    }
+
+    /** 当前 Wi-Fi 客户端地址（连 Wi-Fi 时 wlan0 的地址），未连 Wi-Fi 返回 null */
+    public String currentWifiClientIp() {
+        try {
+            WifiInfo info = wifiManager != null ? wifiManager.getConnectionInfo() : null;
+            if (info == null || info.getNetworkId() == -1) return null;
+            int ipInt = info.getIpAddress();
+            if (ipInt == 0) return null;
+            return String.format("%d.%d.%d.%d",
+                    ipInt & 0xff, (ipInt >> 8) & 0xff, (ipInt >> 16) & 0xff, (ipInt >> 24) & 0xff);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 开热点前记录所有私网 IPv4，供开完后判断哪块网卡是新出现的 AP 网卡 */
+    private void snapshotInterfaces() {
+        Map<String, String> snapshot = new LinkedHashMap<>();
+        try {
+            for (NetworkInterface netint : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                for (InetAddress addr : Collections.list(netint.getInetAddresses())) {
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()
+                            && isPrivateIpv4(addr.getHostAddress())) {
+                        snapshot.put(netint.getName().toLowerCase() + "|" + addr.getHostAddress(), "1");
+                    }
+                }
+            }
+        } catch (Exception ignored) { }
+        ipSnapshotBeforeStart = snapshot;
+        Log.i(TAG, "snapshot before hotspot: " + snapshot.keySet()
+                + ", wifiClientIp=" + currentWifiClientIp());
+        logAllInterfaces("before-start");
+    }
+
+    /** 诊断用：打印所有网卡的 IPv4，机型热点网卡名不在识别规则内时看这里 */
+    public void logAllInterfaces(String stage) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (NetworkInterface netint : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!netint.isUp() || netint.isLoopback()) continue;
+                for (InetAddress addr : Collections.list(netint.getInetAddresses())) {
+                    if (addr instanceof Inet4Address) {
+                        sb.append(netint.getName()).append('=').append(addr.getHostAddress()).append("  ");
+                    }
+                }
+            }
+            Log.i(TAG, "interfaces[" + stage + "]: " + sb);
+        } catch (Exception e) {
+            Log.w(TAG, "logAllInterfaces failed: " + e.getMessage());
         }
     }
 
@@ -143,22 +210,18 @@ public class HotspotHelper {
         return false;
     }
 
-    /** Find LAN IP of the active interface (prefer hotspot AP interface) */
+    /** Find LAN IP of the active interface (hotspot mode 只认热点网卡) */
     public String getLanIp() {
         if (hotspotReservation != null) {
-            String apIp = getHotspotIp();
-            if (apIp != null) return apIp;
+            // 热点模式：绝不回退到 Wi-Fi 客户端地址（否则会显示成家里的 Wi-Fi IP）
+            return getHotspotIp();
         }
         try {
             Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
             for (NetworkInterface netint : Collections.list(nets)) {
                 if (!netint.isUp() || netint.isLoopback()) continue;
                 String name = netint.getName().toLowerCase();
-                if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("wwan")
-                        || name.startsWith("pdp") || name.startsWith("clat") || name.startsWith("tun")
-                        || name.startsWith("dummy") || name.startsWith("ppp")) {
-                    continue;  // 排除流量 / VPN 网卡，避免把运营商 IP 当成本机地址
-                }
+                if (isExcludedInterface(name)) continue;  // 排除流量 / VPN 网卡
                 Enumeration<InetAddress> addrs = netint.getInetAddresses();
                 for (InetAddress addr : Collections.list(addrs)) {
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
@@ -199,6 +262,7 @@ public class HotspotHelper {
         }
 
         starting = true;
+        snapshotInterfaces();   // 记录开热点前的网卡快照，用于之后 diff 出 AP 地址
         try {
             wifiManager.startLocalOnlyHotspot(new LocalOnlyHotspotCallback() {
                 @Override
@@ -303,6 +367,7 @@ public class HotspotHelper {
             Log.w(TAG, "Read WifiConfiguration failed: " + t.getMessage());
         }
         Log.i(TAG, "LocalOnlyHotspot started! ssid=" + hotspotSsid + ", waiting for AP ip...");
+        logAllInterfaces("hotspot-started");
         verifyHotspotStarted(0);
     }
 
@@ -318,6 +383,7 @@ public class HotspotHelper {
             return;
         }
         Log.w(TAG, "Hotspot started but AP interface has no IPv4 address");
+        logAllInterfaces("hotspot-no-ip");
         notifyState("started", null);
     }
 

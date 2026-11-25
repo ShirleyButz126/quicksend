@@ -172,8 +172,30 @@ VERSION = "1.0.8"
 GLOBAL_PORT = 5000
 
 
+def _android_lan_ip_from_file():
+    """Android：Java 层把「当前应展示的本机地址」写入 filesDir/lan_ip.txt
+    （开热点后是热点地址，关热点后回到 Wi-Fi 地址），这里每次读取以保持最新。"""
+    root = os.environ.get('QUICKSEND_DATA_ROOT') or ''
+    if not root:
+        return None
+    try:
+        with open(os.path.join(root, 'lan_ip.txt'), 'r') as f:
+            ip = f.read().strip()
+        parts = ip.split('.')
+        if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
 def get_local_ip():
     try:
+        # 0. Android：优先用 Java 层写入的实时地址（热点地址会随之更新）
+        android_ip = _android_lan_ip_from_file() if IS_ANDROID else None
+        if android_ip:
+            return android_ip
+
         # 0. Check env var
         env_ip = os.environ.get('HOST_IP') or os.environ.get('LAN_IP')
         if env_ip:
@@ -848,7 +870,14 @@ def api_ip():
                     except Exception:
                         port = None
         
-        if env_ip:
+        if IS_ANDROID:
+            # 其它设备访问时，Host 头就是它实际连到的地址（Wi-Fi IP 或热点 IP），
+            # 不能用启动时注入的旧地址覆盖；只有本机（127.0.0.1）访问才回填本机地址。
+            if ip in ('127.0.0.1', 'localhost', '::1', '0.0.0.0', ''):
+                dyn_ip = _android_lan_ip_from_file() or env_ip
+                if dyn_ip:
+                    ip = dyn_ip
+        elif env_ip:
             ip = env_ip
 
         if port is None:

@@ -499,6 +499,77 @@ const QrCodeModal = ({
   );
 };
 
+// Wi-Fi 二维码（WIFI:T:WPA;S:..;P:..;;）特殊字符转义
+const escapeWifiQr = (s: string) => String(s || '').replace(/([\\;,":])/g, '\\$1');
+
+// 热点二维码：① 扫码加入热点 ② 扫码打开传输页面
+const HotspotQrModal = ({
+  isOpen,
+  onClose,
+  ssid,
+  password,
+  url
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  ssid: string;
+  password: string;
+  url: string;
+}) => {
+  if (!isOpen) return null;
+  const wifiValue = ssid ? `WIFI:T:WPA;S:${escapeWifiQr(ssid)};P:${escapeWifiQr(password)};;` : '';
+
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+      <div
+        className="relative bg-white rounded-2xl shadow-2xl p-6 flex flex-col items-center max-w-sm w-full mx-4 max-h-[90vh] overflow-y-auto animate-scale-in"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          onClick={onClose}
+          className="absolute right-3 top-3 p-2 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition-colors"
+        >
+          <X size={22} />
+        </button>
+
+        <h3 className="text-lg font-bold text-slate-900 mb-1">连接热点</h3>
+        <p className="text-[11px] text-slate-400 mb-4">先扫码加入热点，再扫码打开页面</p>
+
+        <div className="w-full flex flex-col items-center gap-2">
+          <span className="text-xs font-semibold text-slate-600">① 扫码加入热点</span>
+          {wifiValue ? (
+            <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-inner">
+              <QRCodeCanvas value={wifiValue} size={180} level="M" includeMargin />
+            </div>
+          ) : (
+            <span className="text-xs text-slate-400">热点名称/密码不完整</span>
+          )}
+          <span className="text-[11px] text-slate-500 font-mono break-all text-center">
+            {ssid || '（未知热点）'}{password ? ` / ${password}` : ''}
+          </span>
+        </div>
+
+        {url && (
+          <div className="w-full flex flex-col items-center gap-2 mt-4 pt-4 border-t border-slate-100">
+            <span className="text-xs font-semibold text-slate-600">② 扫码打开页面</span>
+            <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-inner">
+              <QRCodeCanvas value={url} size={180} level="M" includeMargin />
+            </div>
+            <span className="text-[11px] text-slate-500 font-mono break-all text-center">{url}</span>
+          </div>
+        )}
+
+        <p className="text-slate-400 mt-4 text-[11px] text-center">
+          用手机相机扫码即可加入热点（iOS 11+ / Android 10+）
+        </p>
+      </div>
+
+      <div className="absolute inset-0 -z-10" onClick={onClose} />
+    </div>,
+    document.body
+  );
+};
+
 const UserProfileCard = ({
   ipAddress,
   username,
@@ -508,7 +579,8 @@ const UserProfileCard = ({
   isHost,
   onOpenSettings,
   version,
-  build
+  build,
+  onRefreshIp
 }: {
   ipAddress: string | null,
   username: string,
@@ -518,10 +590,12 @@ const UserProfileCard = ({
   isHost?: boolean,
   onOpenSettings?: () => void,
   version?: string,
-  build?: string
+  build?: string,
+  onRefreshIp?: () => void
 }) => {
   const [copied, setCopied] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
+  const [showHotspotQr, setShowHotspotQr] = useState(false);
 
   // === Hotspot state ===
   const [hotspotStatus, setHotspotStatus] = useState<'idle' | 'starting' | 'running' | 'stopped' | 'failed' | 'redirect'>('idle');
@@ -554,8 +628,16 @@ const UserProfileCard = ({
             setHotspotIp(data?.ip || '');
             setHotspotSsid(data?.ssid || '');
             setHotspotPassword(data?.password || '');
+            onRefreshIp?.();
           }
-          else if (data?.state === 'stopped') { setHotspotStatus('idle'); setHotspotSsid(''); setHotspotPassword(''); setHotspotIp(''); }
+          else if (data?.state === 'stopped' || data?.state === 'idle') {
+            setHotspotStatus('idle');
+            setHotspotSsid('');
+            setHotspotPassword('');
+            setHotspotIp('');
+            onRefreshIp?.();
+          }
+          else if (data?.state === 'starting') { setHotspotStatus('starting'); }
           else if (data?.state?.startsWith('failed')) { setHotspotStatus('failed'); setHotspotError(data.state); }
           // fallback: LocalOnlyHotspot 不支持/失败 → 展示具体原因（Java 层会弹框引导）
           else if (data?.state?.startsWith('fallback')) {
@@ -565,6 +647,20 @@ const UserProfileCard = ({
         }
       };
     }
+
+    // 页面刷新后向原生层要一次热点状态，恢复卡片（仅在 APK WebView 里执行）
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries += 1;
+      const inWebView = typeof (window as any).__QUICKSEND_BUILD__ === 'number';
+      if (inWebView) {
+        clearInterval(timer);
+        window.location.href = 'quicksend://hotspot?action=status';
+      } else if (tries >= 6) {
+        clearInterval(timer);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
   }, []);
 
   const startHotspot = () => {
@@ -588,9 +684,13 @@ const UserProfileCard = ({
     window.location.href = `quicksend://request-permission?name=${hotspotNeedPerm}`;
   };
 
+  // 热点开启时，顶部地址优先显示热点地址（其它设备连热点后要用这个地址）
+  const hotspotUrl = hotspotIp ? `http://${hotspotIp}:5000` : '';
+  const displayAddress = hotspotStatus === 'running' && hotspotUrl ? hotspotUrl : ipAddress;
+
   const handleCopy = () => {
-    if (ipAddress) {
-      safeCopyText(ipAddress).then(() => {
+    if (displayAddress) {
+      safeCopyText(displayAddress).then(() => {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       });
@@ -602,7 +702,14 @@ const UserProfileCard = ({
       <QrCodeModal
         isOpen={showQrCode}
         onClose={() => setShowQrCode(false)}
-        url={ipAddress}
+        url={displayAddress}
+      />
+      <HotspotQrModal
+        isOpen={showHotspotQr}
+        onClose={() => setShowHotspotQr(false)}
+        ssid={hotspotSsid}
+        password={hotspotPassword}
+        url={hotspotUrl}
       />
       <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
@@ -680,7 +787,7 @@ const UserProfileCard = ({
               <div className="relative overflow-hidden">
                 <code className="text-sm font-mono font-medium text-slate-100 whitespace-nowrap truncate group-hover/ip:overflow-visible group-hover/ip:text-clip transition-all duration-300">
                   <span className="group-hover/ip:animate-[marquee_5s_linear_infinite] inline-block">
-                    {ipAddress || '获取中...'}
+                    {displayAddress || '获取中...'}
                   </span>
                 </code>
               </div>
@@ -700,7 +807,9 @@ const UserProfileCard = ({
             </div>
           </div>
           <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-            在同一 Wi-Fi 下的设备浏览器中输入此地址即可互传文件。
+            {hotspotStatus === 'running'
+              ? '已切换为热点地址：其他设备连上本机热点后，用此地址访问。'
+              : '在同一 Wi-Fi 下的设备浏览器中输入此地址即可互传文件。'}
           </p>
           <style>{`
             @keyframes marquee {
@@ -777,6 +886,15 @@ const UserProfileCard = ({
                     ? <>其他设备连上该热点 → 浏览器打开 <code className="font-mono">http://{hotspotIp}:5000</code></>
                     : '正在获取热点地址…'}
                 </p>
+                {hotspotSsid && (
+                  <button
+                    onClick={() => setShowHotspotQr(true)}
+                    className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-indigo-600 hover:text-indigo-700"
+                  >
+                    <QrCode size={11} />
+                    显示连接二维码（扫码加入热点）
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -2293,12 +2411,8 @@ const Home = () => {
      }
   };
 
-  // Initialize Data and Auth
-  useEffect(() => {
-    initTCB();
-    recordInstall();
-    recordDailyActive();
-
+  // 拉取 /api/ip 并刷新顶部「局域网连接地址」（热点开/关后调用可拿到最新地址）
+  const refreshIpConfig = () => {
     fetch('/api/ip')
       .then(res => res.json())
       .then((data: IpResponse) => {
@@ -2314,6 +2428,15 @@ const Home = () => {
         setConfig(data);
       })
       .catch(console.error);
+  };
+
+  // Initialize Data and Auth
+  useEffect(() => {
+    initTCB();
+    recordInstall();
+    recordDailyActive();
+
+    refreshIpConfig();
 
     // Check Token
     const token = localStorage.getItem('token');
@@ -2830,6 +2953,7 @@ const Home = () => {
               onOpenSettings={() => setShowSettings(true)}
               version={config?.version}
               build={config?.build}
+              onRefreshIp={refreshIpConfig}
             />
 
             <div className="space-y-3">
