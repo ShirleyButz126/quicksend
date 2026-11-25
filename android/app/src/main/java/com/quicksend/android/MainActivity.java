@@ -71,6 +71,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
     private final Handler networkHandler = new Handler(Looper.getMainLooper());
     private ConnectivityManager.NetworkCallback networkCallback;
+    private ConnectivityManager.NetworkCallback lanNetworkCallback;
     private int networkChangeToken = 0;
 
     private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
@@ -181,16 +182,49 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             Log.w("QuickSend", "注册网络监听失败: " + e.getMessage());
             networkCallback = null;
         }
+
+        // 只监听默认网络不够：流量没关时连上 Wi-Fi，默认网络可能仍是流量，
+        // 这里再单独监听 Wi-Fi / 网线网卡的出现与消失，保证地址能跟着变。
+        lanNetworkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                scheduleNetworkRefresh();
+            }
+
+            @Override
+            public void onLost(Network network) {
+                scheduleNetworkRefresh();
+            }
+        };
+        try {
+            android.net.NetworkRequest request = new android.net.NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                    .build();
+            cm.registerNetworkCallback(request, lanNetworkCallback);
+        } catch (Exception e) {
+            Log.w("QuickSend", "注册 Wi-Fi 监听失败: " + e.getMessage());
+            lanNetworkCallback = null;
+        }
     }
 
     private void unregisterNetworkMonitor() {
-        if (networkCallback == null) return;
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm != null) cm.unregisterNetworkCallback(networkCallback);
-        } catch (Exception ignored) {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) return;
+        if (networkCallback != null) {
+            try {
+                cm.unregisterNetworkCallback(networkCallback);
+            } catch (Exception ignored) {
+            }
+            networkCallback = null;
         }
-        networkCallback = null;
+        if (lanNetworkCallback != null) {
+            try {
+                cm.unregisterNetworkCallback(lanNetworkCallback);
+            } catch (Exception ignored) {
+            }
+            lanNetworkCallback = null;
+        }
     }
 
     private void scheduleNetworkRefresh() {
@@ -1032,11 +1066,34 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
+        if (webView == null) {
+            performExit();
+            return;
         }
+        // 先问前端有没有打开的弹窗：有就关弹窗，没有才退出
+        webView.evaluateJavascript(
+                "(function(){try{return (window.__quicksend&&window.__quicksend.onBackPressed)"
+                        + "?window.__quicksend.onBackPressed():'exit';}catch(e){return 'exit';}})()",
+                value -> {
+                    boolean handled = value != null && value.contains("handled");
+                    if (handled) return;
+                    if (webView != null && webView.canGoBack()) {
+                        webView.goBack();
+                    } else {
+                        performExit();
+                    }
+                });
+    }
+
+    private void performExit() {
+        super.onBackPressed();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 回到前台时补一次地址刷新（有些机型不回调网络变化）
+        scheduleNetworkRefresh();
     }
 
     @Override

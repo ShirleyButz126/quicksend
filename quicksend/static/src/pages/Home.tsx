@@ -708,6 +708,21 @@ const HotspotQrModal = ({
   );
 };
 
+// 弹窗打开时登记一个返回键处理函数；原生返回键会调用栈顶的函数
+const useBackHandler = (active: boolean, onBack: () => void) => {
+  useEffect(() => {
+    if (!active) return;
+    const w = window as any;
+    w.__qsBackStack = w.__qsBackStack || [];
+    w.__qsBackStack.push(onBack);
+    return () => {
+      const stack: Array<() => void> = w.__qsBackStack || [];
+      const index = stack.lastIndexOf(onBack);
+      if (index >= 0) stack.splice(index, 1);
+    };
+  }, [active, onBack]);
+};
+
 const UserProfileCard = ({
   ipAddress,
   username,
@@ -734,6 +749,9 @@ const UserProfileCard = ({
   const [copied, setCopied] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
   const [showHotspotQr, setShowHotspotQr] = useState(false);
+
+  useBackHandler(showQrCode, () => setShowQrCode(false));
+  useBackHandler(showHotspotQr, () => setShowHotspotQr(false));
 
   // === Hotspot state ===
   const [hotspotStatus, setHotspotStatus] = useState<'idle' | 'starting' | 'running' | 'stopped' | 'failed' | 'redirect'>('idle');
@@ -1681,14 +1699,14 @@ const SettingsModal = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4 animate-fade-in">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 shrink-0">
           <h3 className="font-bold text-slate-900">设置</h3>
           <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-200/50 transition-colors">
             <X size={20} />
           </button>
         </div>
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 overflow-y-auto flex-1">
           {/* Path */}
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">文件存储位置</label>
@@ -1805,7 +1823,7 @@ const SettingsModal = ({
             <p className="text-xs text-slate-500 mt-2 ml-1">清理在服务端执行，手机或电脑作为服务端时均有效。</p>
           </div>
         </div>
-        <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
+        <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3 shrink-0">
           <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">
             取消
           </button>
@@ -2725,6 +2743,34 @@ const Home = () => {
     open: boolean;
     groupId: string | null;
   }>({ open: false, groupId: null });
+
+  // 返回键：优先关掉最近打开的弹窗
+  useBackHandler(showSettings, () => setShowSettings(false));
+  useBackHandler(showAuthModal, () => setShowAuthModal(false));
+  useBackHandler(!!previewFile, () => setPreviewFile(null));
+  useBackHandler(confirmationModal.open, () => setConfirmationModal(prev => ({ ...prev, open: false })));
+  useBackHandler(deleteGroupModal.open, () => setDeleteGroupModal({ open: false, groupId: null }));
+  useBackHandler(showGroupModal.open, () => setShowGroupModal({ open: false, parent: 'root' }));
+  useBackHandler(editGroupModal.open, () => setEditGroupModal({ open: false, group: null }));
+  useBackHandler(inputModal.open, () => setInputModal(prev => ({ ...prev, open: false })));
+
+  // 原生返回键入口 + 定时刷新地址（部分机型不回调网络变化，双保险）
+  useEffect(() => {
+    const w = window as any;
+    w.__quicksend = w.__quicksend || {};
+    w.__quicksend.onBackPressed = () => {
+      const stack: Array<() => void> = w.__qsBackStack || [];
+      if (stack.length) {
+        stack[stack.length - 1]();
+        return 'handled';
+      }
+      return 'exit';
+    };
+    const timer = setInterval(() => {
+      refreshIpConfig();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   const ipAddress = (() => {
     const wl = typeof window !== 'undefined' ? window.location : null;
