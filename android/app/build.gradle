@@ -3,6 +3,15 @@ plugins {
     id 'com.chaquo.python'
 }
 
+// --- 固定签名：CI 里由 Workflow 根据 Secrets 生成 android/app/keystore.properties ---
+// 没有该文件时（普通本地构建）自动退回 Android 默认 debug 签名，构建不会失败。
+def keystorePropsFile = rootProject.file('app/keystore.properties')
+def keystoreProperties = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProperties.load(it) }
+}
+def hasFixedKeystore = keystoreProperties['storeFile'] != null && keystoreProperties['storeFile'] != ''
+
 // --- FileProvider 需要 androidx.core ---
 android {
     namespace 'com.quicksend.android'
@@ -30,9 +39,16 @@ android {
     }
 
     signingConfigs {
-        // debug 始终可用（Android 默认 debug keystore）
-        // release 条件定义：有 properties 文件才配
-        if (keystoreProperties['storeFile']) {
+        // debug：CI 提供了固定 keystore 才覆盖，否则沿用 Android 默认 debug 签名
+        // （固定后新版 APK 可以直接覆盖安装旧版，不会因签名不同安装失败）
+        if (hasFixedKeystore) {
+            debug {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+                storeType keystoreProperties['storeType'] ?: 'pkcs12'
+            }
             release {
                 storeFile file(keystoreProperties['storeFile'])
                 storePassword keystoreProperties['storePassword']

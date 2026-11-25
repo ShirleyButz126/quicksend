@@ -62,3 +62,9 @@ quicksend/quicksend/__pycache__/
 quicksend/QuickSend/
 quicksend/uploads/
 
+# 签名文件（CI 由 Secrets 生成，禁止提交）
+keystore.properties
+android/app/keystore.properties
+*.keystore
+*.jks
+
