@@ -1054,11 +1054,82 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
   const [groupId, setGroupId] = useState<string>(selectedGroupId || 'root');
   useEffect(() => { setGroupId(selectedGroupId || 'root'); }, [selectedGroupId]);
 
-  const handleDrop = (e: React.DragEvent) => {
+  // 在浏览器内把一批文件打成 zip（不压缩，只打包）再走分片上传
+  const packAndUpload = async (items: Array<{ file: File; path: string }>, rootName: string) => {
+    if (!items.length) {
+      alert('文件夹是空的');
+      return;
+    }
+    const totalSize = items.reduce((sum, it) => sum + it.file.size, 0);
+    if (totalSize > 1.5 * 1024 * 1024 * 1024) {
+      alert('文件夹大于 1.5GB，打包会占用大量内存，建议先在电脑上压缩成 zip 再上传');
+      return;
+    }
+    setIsZipping(true);
+    setZipPercent(0);
+    try {
+      const zip = new JSZip();
+      items.forEach(it => zip.file(it.path, it.file));
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }, (meta) => {
+        setZipPercent(meta.percent);
+      });
+      const zipFile = new window.File([blob], `${rootName || 'folder'}.zip`, { type: 'application/zip', lastModified: Date.now() });
+      onUpload([zipFile], password, groupId);
+    } catch (err: any) {
+      alert('打包失败：' + (err?.message || '未知错误'));
+    } finally {
+      setIsZipping(false);
+      setZipPercent(0);
+    }
+  };
+
+  // 递归遍历拖入的目录（readEntries 每次最多返回 100 项，需要循环读完）
+  const collectEntryFiles = async (entry: any, prefix: string, out: Array<{ file: File; path: string }>) => {
+    if (!entry) return;
+    if (entry.isFile) {
+      const file: File = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      out.push({ file, path: prefix + file.name });
+      return;
+    }
+    if (!entry.isDirectory) return;
+    const reader = entry.createReader();
+    const readBatch = () => new Promise<any[]>((resolve, reject) => reader.readEntries(resolve, reject));
+    let batch = await readBatch();
+    while (batch.length) {
+      for (const child of batch) {
+        await collectEntryFiles(child, `${prefix}${entry.name}/`, out);
+      }
+      batch = await readBatch();
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    if (mode === 'file' && !isUploading && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      onUpload(e.dataTransfer.files, password, groupId);
+    if (mode !== 'file' || isUploading || isZipping) return;
+    const dt = e.dataTransfer;
+    const entries = Array.from(dt.items || [])
+      .map((it: any) => (typeof it.webkitGetAsEntry === 'function' ? it.webkitGetAsEntry() : null))
+      .filter(Boolean);
+    const hasDir = entries.some((en: any) => en.isDirectory);
+    if (hasDir) {
+      const collected: Array<{ file: File; path: string }> = [];
+      try {
+        for (const entry of entries) await collectEntryFiles(entry, '', collected);
+      } catch (err: any) {
+        alert('读取拖入的文件夹失败：' + (err?.message || '未知错误'));
+        return;
+      }
+      if (!collected.length) {
+        alert('拖入的文件夹里没有文件');
+        return;
+      }
+      const rootName = entries[0]?.name || 'folder';
+      await packAndUpload(collected, rootName);
+      return;
+    }
+    if (dt.files && dt.files.length > 0) {
+      onUpload(dt.files, password, groupId);
     }
   };
 
@@ -1069,36 +1140,14 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
     }
   };
 
-  // 选择文件夹 → 浏览器内打成 zip（不压缩，只打包）再走分片上传
+  // 选择文件夹 → 浏览器内打成 zip 再走分片上传
   const handleDirSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const picked = e.target.files ? Array.from(e.target.files) : [];
+    const picked = Array.from(e.target.files || []);
     if (dirInputRef.current) dirInputRef.current.value = '';
     if (!picked.length) return;
-    const totalSize = picked.reduce((sum, f) => sum + f.size, 0);
-    if (totalSize > 1.5 * 1024 * 1024 * 1024) {
-      alert('文件夹大于 1.5GB，手机内存可能不够打包，建议在电脑上先压缩成 zip 再上传');
-      return;
-    }
-    setIsZipping(true);
-    setZipPercent(0);
-    try {
-      const zip = new JSZip();
-      picked.forEach(f => {
-        const rel = (f as any).webkitRelativePath || f.name;
-        zip.file(rel, f);
-      });
-      const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }, (meta) => {
-        setZipPercent(meta.percent);
-      });
-      const rootName = (((picked[0] as any).webkitRelativePath || '').split('/')[0]) || 'folder';
-      const zipFile = new window.File([blob], `${rootName}.zip`, { type: 'application/zip', lastModified: Date.now() });
-      onUpload([zipFile], password, groupId);
-    } catch (err: any) {
-      alert('打包失败：' + (err?.message || '未知错误'));
-    } finally {
-      setIsZipping(false);
-      setZipPercent(0);
-    }
+    const items = picked.map(f => ({ file: f, path: (f as any).webkitRelativePath || f.name }));
+    const rootName = (((picked[0] as any).webkitRelativePath || '').split('/')[0]) || 'folder';
+    await packAndUpload(items, rootName);
   };
 
   const shareText = () => {
@@ -1175,7 +1224,7 @@ const UploadCard = ({ onUpload, onShareText = () => { }, isUploading, progress, 
                 <Upload size={20} strokeWidth={1.5} />
               </div>
               <h3 className="text-sm font-semibold text-slate-800">点击或拖拽上传</h3>
-              <p className="text-xs text-slate-400 mb-5">支持大文件、断点续传、文件夹打包</p>
+              <p className="text-xs text-slate-400 mb-5">支持大文件、断点续传、拖入文件夹自动打包</p>
       <div className="w-full space-y-2">
                 <div className="relative">
                   <select
