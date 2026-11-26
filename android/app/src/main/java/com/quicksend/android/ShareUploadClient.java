@@ -21,7 +21,8 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * 把系统分享/打开进来的 content:// 文件，按 4MB 分片上传到本机 Flask 服务。
+ * 把系统分享/打开进来的 content:// 文件，按 4MB 分片上传到 QuickSend 服务器。
+ * 默认传本机（127.0.0.1），客户端模式可指定对方服务器地址。
  * 只依赖 Android 内置的 org.json，不引入额外库。
  */
 class ShareUploadClient {
@@ -29,7 +30,21 @@ class ShareUploadClient {
     private static final String TAG = "QuickSend-Share";
     private static final int CHUNK = 4 * 1024 * 1024;
     private static final int MAX_RETRY = 3;
-    private static final String BASE = "http://127.0.0.1:" + QuickSendService.PORT;
+    private static final String LOCAL_BASE = "http://127.0.0.1:" + QuickSendService.PORT;
+
+    private final String base;
+
+    ShareUploadClient() {
+        this(null);
+    }
+
+    ShareUploadClient(String baseUrl) {
+        String b = baseUrl == null ? "" : baseUrl.trim();
+        while (b.endsWith("/")) {
+            b = b.substring(0, b.length() - 1);
+        }
+        this.base = b.isEmpty() ? LOCAL_BASE : b;
+    }
 
     interface Listener {
         void onFileStart(String name, long size, int index, int count);
@@ -149,7 +164,7 @@ class ShareUploadClient {
         byte[] tail = ("\r\n--" + boundary + "--\r\n").getBytes("UTF-8");
         long total = (long) head1.length + head2.length + head3.length + len + tail.length;
 
-        HttpURLConnection conn = (HttpURLConnection) new URL(BASE + "/api/upload/chunk").openConnection();
+        HttpURLConnection conn = (HttpURLConnection) new URL(base + "/api/upload/chunk").openConnection();
         conn.setConnectTimeout(5000);
         conn.setReadTimeout(120000);
         conn.setRequestMethod("POST");
@@ -170,7 +185,7 @@ class ShareUploadClient {
 
     private JSONObject postJson(String path, JSONObject body, int expect) throws Exception {
         byte[] payload = body.toString().getBytes("UTF-8");
-        HttpURLConnection conn = (HttpURLConnection) new URL(BASE + path).openConnection();
+        HttpURLConnection conn = (HttpURLConnection) new URL(base + path).openConnection();
         conn.setConnectTimeout(5000);
         conn.setReadTimeout(120000);
         conn.setRequestMethod("POST");

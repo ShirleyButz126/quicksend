@@ -32,6 +32,10 @@ public class QuickSendService extends Service {
     public static final String ACTION_SHARE_UPLOAD = "com.quicksend.android.action.SHARE_UPLOAD";
     public static final String ACTION_SHARE_DONE = "com.quicksend.android.action.SHARE_UPLOAD_DONE";
     public static final String EXTRA_URIS = "share_uris";
+    /** 客户端模式：上传到指定服务器（http://ip:port） */
+    public static final String EXTRA_UPLOAD_BASE = "share_upload_base";
+    /** 客户端模式：只做上传，不启动本机 Python 服务 */
+    public static final String EXTRA_CLIENT_ONLY = "share_client_only";
     private static final String TAG = "QuickSend";
     private static final String CHANNEL_ID = "quicksend";
     private static final int NOTIFICATION_ID = 1;
@@ -41,6 +45,8 @@ public class QuickSendService extends Service {
     // Python 运行在应用进程内，Service 重启（例如客户端模式切回服务器模式）时不能重复启动 Flask
     private static volatile boolean pythonLaunched = false;
     private volatile boolean shareRunning = false;
+    private volatile String shareBaseUrl = null;
+    private volatile boolean clientOnlyUpload = false;
     private long lastShareNotifyAt = 0L;
     private final List<Uri> pendingShareUris = Collections.synchronizedList(new ArrayList<>());
     private PowerManager.WakeLock wakeLock;
@@ -57,11 +63,17 @@ public class QuickSendService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startForegroundCompat(buildNotification("QuickSend 服务启动中…"));
+        if (intent != null) {
+            shareBaseUrl = intent.getStringExtra(EXTRA_UPLOAD_BASE);
+            clientOnlyUpload = intent.getBooleanExtra(EXTRA_CLIENT_ONLY, false);
+        }
+        startForegroundCompat(buildNotification(
+                clientOnlyUpload ? "正在上传到局域网服务器…" : "QuickSend 服务启动中…"));
         if (wakeLock != null && !wakeLock.isHeld()) {
             wakeLock.acquire();
         }
-        if (!started) {
+        // 客户端模式的临时上传服务：不启动本机 Python
+        if (!clientOnlyUpload && !started) {
             started = true;
             if (!pythonLaunched) {
                 pythonLaunched = true;
@@ -74,7 +86,7 @@ public class QuickSendService extends Service {
                 enqueueShareUploads(uris);
             }
         }
-        return START_STICKY;
+        return clientOnlyUpload ? START_NOT_STICKY : START_STICKY;
     }
 
     private void enqueueShareUploads(List<Uri> uris) {
@@ -98,13 +110,14 @@ public class QuickSendService extends Service {
                 pendingShareUris.clear();
             }
             if (batch.isEmpty()) return;
-            if (!waitForServerReady(90000L)) {
+            final String targetBase = shareBaseUrl;
+            if (!waitForServerReady(targetBase, 90000L)) {
                 notifyShareDone(0, batch.size(), "服务未就绪，请稍后重试");
                 return;
             }
             final int count = batch.size();
             final int[] current = {0};
-            ShareUploadClient client = new ShareUploadClient();
+            ShareUploadClient client = new ShareUploadClient(targetBase);
             ShareUploadClient.Result result = client.uploadAll(
                     getApplicationContext(), batch, new ShareUploadClient.Listener() {
                         @Override
@@ -134,38 +147,38 @@ public class QuickSendService extends Service {
             Log.e(TAG, "分享导入失败", t);
             notifyShareDone(0, batch.size(), String.valueOf(t.getMessage()));
         } finally {
+            boolean hasMore;
+            synchronized (pendingShareUris) {
+                hasMore = !pendingShareUris.isEmpty();
+            }
             synchronized (this) {
                 shareRunning = false;
             }
-            synchronized (pendingShareUris) {
-                if (!pendingShareUris.isEmpty()) {
-                    // 上传过程中又有新的分享进来，继续处理
-                    startShareWorkerIfIdle();
-                }
+            if (hasMore) {
+                // 上传过程中又有新的分享进来，继续处理
+                startShareWorkerIfIdle();
+            } else if (clientOnlyUpload) {
+                // 临时上传服务没有常驻任务，处理完就停（完成通知 id 不同，不会被清掉）
+                stopSelf();
             }
         }
     }
 
-    private boolean waitForServerReady(long timeoutMs) {
+    private boolean waitForServerReady(String baseUrl, long timeoutMs) {
+        String base = (baseUrl == null || baseUrl.isEmpty())
+                ? ("http://127.0.0.1:" + PORT) : baseUrl;
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
+            java.net.HttpURLConnection conn = null;
             try {
-                java.net.Socket socket = new java.net.Socket();
-                try {
-                    socket.connect(new java.net.InetSocketAddress("127.0.0.1", PORT), 800);
-                } finally {
-                    try {
-                        socket.close();
-                    } catch (IOException ignored) {
-                    }
-                }
-                java.net.HttpURLConnection conn = (java.net.HttpURLConnection)
-                        new java.net.URL("http://127.0.0.1:" + PORT + "/api/ip").openConnection();
-                conn.setConnectTimeout(1000);
-                conn.setReadTimeout(1000);
+                conn = (java.net.HttpURLConnection) new java.net.URL(base + "/api/ip").openConnection();
+                conn.setConnectTimeout(1500);
+                conn.setReadTimeout(1500);
                 int code = conn.getResponseCode();
                 if (code >= 200 && code < 500) return true;
             } catch (Exception ignored) {
+            } finally {
+                if (conn != null) conn.disconnect();
             }
             try {
                 Thread.sleep(400);

@@ -293,12 +293,40 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private void handleShareIntent(Intent intent) {
         if (intent == null) return;
         if ("client".equals(runMode)) {
-            // 客户端模式没有本地服务，导入无处可去
-            if (!extractShareUris(intent).isEmpty()) {
-                Toast.makeText(this, "客户端模式下不支持导入文件，请切换到服务器模式",
-                        Toast.LENGTH_LONG).show();
+            // 客户端模式：文件直接上传到当前连接的对方服务器，本机仍不启动 Python
+            List<Uri> clientUris = extractShareUris(intent);
+            if (clientUris.isEmpty()) {
+                CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+                if (text != null && text.length() > 0) {
+                    Uri saved = writeSharedTextToCache(text);
+                    if (saved != null) clientUris.add(saved);
+                }
             }
             intent.setAction(null);
+            if (clientUris.isEmpty()) return;
+            String base = normalizeUrl(clientUrl);
+            if (base == null) {
+                Toast.makeText(this, "客户端模式下没有可用的服务器地址", Toast.LENGTH_LONG).show();
+                return;
+            }
+            Intent uploadIntent = new Intent(this, QuickSendService.class);
+            uploadIntent.setAction(QuickSendService.ACTION_SHARE_UPLOAD);
+            uploadIntent.putParcelableArrayListExtra(QuickSendService.EXTRA_URIS, new ArrayList<>(clientUris));
+            uploadIntent.putExtra(QuickSendService.EXTRA_UPLOAD_BASE, base);
+            uploadIntent.putExtra(QuickSendService.EXTRA_CLIENT_ONLY, true);
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    startForegroundService(uploadIntent);
+                } else {
+                    startService(uploadIntent);
+                }
+            } catch (Exception e) {
+                Log.e("QuickSend", "客户端模式上传启动失败", e);
+                Toast.makeText(this, "上传失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+                return;
+            }
+            Toast.makeText(this, "正在上传 " + clientUris.size() + " 个文件到 " + base + "…",
+                    Toast.LENGTH_SHORT).show();
             return;
         }
         List<Uri> uris = extractShareUris(intent);
@@ -883,6 +911,8 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         Log.i("QuickSend", "enter client mode: " + clientUrl);
         Toast.makeText(this, "客户端模式：" + clientUrl, Toast.LENGTH_SHORT).show();
         webView.loadUrl(clientUrl);
+        // 冷启动就是分享进来的文件：上传到对方服务器
+        handleShareIntent(getIntent());
     }
 
     private void showClientBadge(boolean show) {
