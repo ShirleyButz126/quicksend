@@ -612,6 +612,7 @@ const QrCodeModal = ({
         <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-inner mb-6">
           <QRCodeCanvas
             id="qr-code-canvas"
+            key={url}
             value={url}
             size={240}
             level={"H"}
@@ -677,7 +678,7 @@ const HotspotQrModal = ({
           <span className="text-xs font-semibold text-slate-600">① 扫码加入热点</span>
           {wifiValue ? (
             <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-inner">
-              <QRCodeCanvas value={wifiValue} size={180} level="M" includeMargin />
+              <QRCodeCanvas key={wifiValue} value={wifiValue} size={180} level="M" includeMargin />
             </div>
           ) : (
             <span className="text-xs text-slate-400">热点名称/密码不完整</span>
@@ -691,7 +692,7 @@ const HotspotQrModal = ({
           <div className="w-full flex flex-col items-center gap-2 mt-4 pt-4 border-t border-slate-100">
             <span className="text-xs font-semibold text-slate-600">② 扫码打开页面</span>
             <div className="bg-white p-2 rounded-xl border border-slate-100 shadow-inner">
-              <QRCodeCanvas value={url} size={180} level="M" includeMargin />
+              <QRCodeCanvas key={url} value={url} size={180} level="M" includeMargin />
             </div>
             <span className="text-[11px] text-slate-500 font-mono break-all text-center">{url}</span>
           </div>
@@ -822,6 +823,15 @@ const UserProfileCard = ({
     }, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // 热点可能被系统快捷开关关闭，运行时定时同步状态与地址
+  useEffect(() => {
+    if (hotspotStatus !== 'running') return;
+    const timer = setInterval(() => {
+      window.location.href = 'quicksend://hotspot?action=status';
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [hotspotStatus]);
 
   const startHotspot = () => {
     setHotspotError('');

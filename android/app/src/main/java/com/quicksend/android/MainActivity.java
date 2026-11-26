@@ -643,11 +643,12 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     result = hotspotHelper.stopHotspot();
                     if (!result.startsWith("error:")) {
                         // 关闭后地址回到 Wi-Fi 地址，直接推给前端，避免被下面的 'ok' 误判成已开启
+                        lastPublishedIp = null;   // 让兜底轮询强制再同步一次
                         publishLanIp();
                         if (webView != null) {
                             webView.evaluateJavascript(
                                     "__quicksend.onHotspotState({state:'stopped', ip:'"
-                                            + jsEscape(hotspotHelper.getLanIp())
+                                            + jsEscape(currentEffectiveIp())
                                             + "', ssid:'', password:'', active:false})", null);
                         }
                         return;
@@ -682,7 +683,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
     /** 当前热点/本机地址写给 Python（filesDir/lan_ip.txt），/api/ip 会动态读取 */
     private void publishLanIp() {
-        String ip = hotspotHelper == null ? null : hotspotHelper.getLanIp();
+        String ip = currentEffectiveIp();
         // 必须和 Python 的 QUICKSEND_DATA_ROOT 一致：Service 传给 Python 的是 getExternalFilesDir(null)
         File dir = getExternalFilesDir(null);
         if (dir == null) dir = getFilesDir();
@@ -696,6 +697,43 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             Log.w("QuickSend", "publishLanIp failed: " + e.getMessage());
         }
     }
+
+    /** 当前应对外展示的地址：热点开着用热点地址，否则用 Wi-Fi / USB 等网卡地址 */
+    private String currentEffectiveIp() {
+        if (hotspotHelper == null) return null;
+        String ip = hotspotHelper.isHotspotActive() ? hotspotHelper.getHotspotIp() : null;
+        if (ip == null || ip.isEmpty()) ip = hotspotHelper.getLanIp();
+        return ip;
+    }
+
+    private String lastPublishedIp = null;
+
+    /** 地址有变化时写文件并通知前端；用于兜底轮询（热点被系统关闭等收不到广播的场景） */
+    private boolean syncLanIpIfChanged() {
+        String ip = currentEffectiveIp();
+        String normalized = ip == null ? "" : ip;
+        boolean changed = !normalized.equals(lastPublishedIp);
+        if (changed) {
+            lastPublishedIp = normalized;
+            publishLanIp();
+            final String jsIp = jsEscape(ip);
+            runOnUiThread(() -> {
+                if (webView == null) return;
+                webView.evaluateJavascript(
+                        "if(window.__quicksend&&window.__quicksend.onNetworkChange){"
+                                + "window.__quicksend.onNetworkChange({ip:'" + jsIp + "'});}", null);
+            });
+        }
+        return changed;
+    }
+
+    private final Runnable lanIpTicker = new Runnable() {
+        @Override
+        public void run() {
+            new Thread(() -> { syncLanIpIfChanged(); }, "quicksend-ip-tick").start();
+            networkHandler.postDelayed(this, 4000);
+        }
+    };
 
     /** 把当前热点状态推给前端（页面刷新后也能恢复卡片状态） */
     private void sendHotspotStatus() {
@@ -1100,6 +1138,14 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         super.onResume();
         // 回到前台时补一次地址刷新（有些机型不回调网络变化）
         scheduleNetworkRefresh();
+        networkHandler.removeCallbacks(lanIpTicker);
+        networkHandler.postDelayed(lanIpTicker, 2000);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        networkHandler.removeCallbacks(lanIpTicker);
     }
 
     @Override
