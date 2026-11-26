@@ -1295,11 +1295,20 @@ def _received_chunks(upload_id):
         return []
     result = []
     for name in os.listdir(d):
-        if name.endswith('.part'):
-            stem = name[:-5]
+        # 新格式：收到即按偏移写入 data，用 .ok 标记；旧格式：.part 分片文件
+        if name.endswith('.ok') or name.endswith('.part'):
+            stem = name.rsplit('.', 1)[0]
             if stem.isdigit():
                 result.append(int(stem))
-    return sorted(result)
+    return sorted(set(result))
+
+
+def _upload_meta_size(d):
+    try:
+        with open(os.path.join(d, 'meta.json'), 'r', encoding='utf-8') as f:
+            return int((json.load(f) or {}).get('size') or 0)
+    except Exception:
+        return 0
 
 
 def _safe_upload_name(raw_name):
@@ -1351,11 +1360,22 @@ def upload_init():
     except Exception as e:
         return jsonify({'error': f'创建临时目录失败: {e}'}), 500
     try:
+        size = int(data.get('size') or 0)
+    except (TypeError, ValueError):
+        size = 0
+    try:
         with open(os.path.join(d, 'meta.json'), 'w', encoding='utf-8') as f:
             json.dump({
                 'filename': data.get('filename') or '',
-                'size': data.get('size') or 0,
+                'size': size,
+                'chunk_size': CHUNK_SIZE,
             }, f, ensure_ascii=False)
+        # 预分配最终文件（稀疏文件），分片按偏移直接写入，免去完成时再合并一遍
+        if size > 0:
+            data_path = os.path.join(d, 'data')
+            with open(data_path, 'ab') as f:
+                if f.tell() < size:
+                    f.truncate(size)
     except Exception:
         pass
     _cleanup_stale_uploads()
@@ -1373,12 +1393,10 @@ def upload_status():
         return jsonify({'error': 'invalid upload_id'}), 400
     received = _received_chunks(upload_id)
     d = _upload_tmp_dir(upload_id)
-    received_bytes = 0
-    for idx in received:
-        try:
-            received_bytes += os.path.getsize(os.path.join(d, f'{idx}.part'))
-        except OSError:
-            pass
+    total = _upload_meta_size(d)
+    received_bytes = len(received) * CHUNK_SIZE
+    if total and received_bytes > total:
+        received_bytes = total
     return jsonify({
         'upload_id': upload_id,
         'received': received,
@@ -1402,12 +1420,27 @@ def upload_chunk():
     if not part:
         return jsonify({'error': 'missing chunk'}), 400
     d = _upload_tmp_dir(upload_id)
+    data_path = os.path.join(d, 'data')
+    offset = index * CHUNK_SIZE
     try:
         os.makedirs(d, exist_ok=True)
-        final_path = os.path.join(d, f'{index}.part')
-        tmp_path = final_path + '.tmp'
-        part.save(tmp_path)
-        os.replace(tmp_path, final_path)
+        total = _upload_meta_size(d)
+        if total and offset >= total:
+            return jsonify({'error': 'chunk index out of range'}), 400
+        if not os.path.exists(data_path):
+            # 'ab' 不会截断已有内容，避免并发建文件的竞态
+            with open(data_path, 'ab'):
+                pass
+        # 直接写到最终文件的偏移位置（每片 4MB 连续写），不再单独存 .part
+        with open(data_path, 'r+b') as out:
+            out.seek(offset)
+            while True:
+                buf = part.stream.read(1024 * 1024)
+                if not buf:
+                    break
+                out.write(buf)
+        with open(os.path.join(d, f'{index}.ok'), 'wb'):
+            pass
     except Exception as e:
         log(f'[分片上传] 写入分片失败 {upload_id}#{index}: {e}')
         return jsonify({'error': str(e)}), 500
@@ -1424,12 +1457,16 @@ def upload_complete():
     received = _received_chunks(upload_id)
     if not received:
         return jsonify({'error': 'no chunks'}), 400
-    expected = list(range(received[-1] + 1))
+    expected_size = int(data.get('size') or 0) or _upload_meta_size(d)
+    if expected_size > 0:
+        total = (expected_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    else:
+        total = received[-1] + 1
+    expected = list(range(total))
     if received != expected:
         missing = sorted(set(expected) - set(received))
         return jsonify({'error': 'missing chunks', 'missing': missing}), 409
 
-    expected_size = int(data.get('size') or 0)
     uploader = data.get('uploader') or ''
     password = data.get('password') or ''
     group_id = (data.get('group_id') or 'root').strip() or 'root'
@@ -1437,16 +1474,28 @@ def upload_complete():
 
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    data_path = os.path.join(d, 'data')
     merged_size = 0
     try:
-        with open(save_path, 'wb') as out:
-            for idx in received:
-                part_path = os.path.join(d, f'{idx}.part')
-                with open(part_path, 'rb') as fin:
-                    shutil.copyfileobj(fin, out, 1024 * 1024)
-                merged_size += os.path.getsize(part_path)
+        if os.path.exists(data_path):
+            # 新格式：分片已按偏移写进同一个文件，直接改名即可，无需合并
+            merged_size = os.path.getsize(data_path)
+            try:
+                os.replace(data_path, save_path)
+            except OSError:
+                shutil.move(data_path, save_path)
+        else:
+            # 旧格式兜底：把 .part 分片按顺序合并
+            with open(save_path, 'wb') as out:
+                for idx in received:
+                    part_path = os.path.join(d, f'{idx}.part')
+                    if not os.path.exists(part_path):
+                        continue
+                    with open(part_path, 'rb') as fin:
+                        shutil.copyfileobj(fin, out, 1024 * 1024)
+                    merged_size += os.path.getsize(part_path)
     except Exception as e:
-        log(f'[分片上传] 合并失败 {upload_id}: {e}')
+        log(f'[分片上传] 落盘失败 {upload_id}: {e}')
         try:
             os.remove(save_path)
         except OSError:
