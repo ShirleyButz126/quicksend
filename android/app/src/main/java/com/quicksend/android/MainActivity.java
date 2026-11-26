@@ -10,8 +10,10 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Color;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -22,6 +24,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -33,11 +36,19 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.core.content.FileProvider;
+
+import com.journeyapps.barcodescanner.IntentIntegrator;
+import com.journeyapps.barcodescanner.IntentResult;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -59,9 +70,25 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private static final String DOWNLOAD_SUBDIR = "QuickSend";
     private static final String FILEPROVIDER_AUTH = "com.quicksend.android.fileprovider";
 
+    // 运行模式：server = 本机服务器 / auto = 本机服务器 + 自动发现 / client = 只连其它服务器
+    private static final String PREFS_NAME = "quicksend_prefs";
+    private static final String KEY_MODE = "run_mode";
+    private static final String KEY_CLIENT_URL = "client_url";
+
     private WebView webView;
     private TextView splash;
+    private TextView clientBadge;
+    private FrameLayout rootView;
     private ValueCallback<Uri[]> fileCallback;
+
+    private String runMode = "server";
+    private String clientUrl = "";
+    private boolean serverStarted = false;
+    private boolean serverProbing = false;
+    private volatile boolean autoDiscoveryRunning = false;
+
+    private EditText modeUrlInput;
+    private RadioButton modeClientRadio;
 
     private long lastDownloadId = -1;
     private String lastDownloadName;
@@ -103,19 +130,34 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        FrameLayout root = new FrameLayout(this);
+        rootView = new FrameLayout(this);
         webView = new WebView(this);
-        root.addView(webView, new FrameLayout.LayoutParams(
+        rootView.addView(webView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         splash = new TextView(this);
         splash.setText("QuickSend 服务启动中…");
         splash.setTextSize(16);
         splash.setGravity(Gravity.CENTER);
-        root.addView(splash, new FrameLayout.LayoutParams(
+        rootView.addView(splash, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        setContentView(root);
+        // 客户端模式没有本地面板，用这个浮标返回服务器模式
+        clientBadge = new TextView(this);
+        clientBadge.setText("⌂ 服务器模式");
+        clientBadge.setTextSize(12);
+        clientBadge.setTextColor(Color.WHITE);
+        clientBadge.setBackgroundColor(0xCC0F172A);
+        clientBadge.setPadding(dp(12), dp(7), dp(12), dp(7));
+        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        badgeParams.gravity = Gravity.BOTTOM | Gravity.END;
+        badgeParams.setMargins(0, 0, dp(16), dp(16));
+        clientBadge.setVisibility(View.GONE);
+        clientBadge.setOnClickListener(v -> confirmReturnToServerMode());
+        rootView.addView(clientBadge, badgeParams);
+
+        setContentView(rootView);
 
         hotspotHelper = new HotspotHelper(this);
         HotspotHelper.stateListener = this;
@@ -137,22 +179,14 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS);
         }
 
-        Intent serviceIntent = new Intent(this, QuickSendService.class);
-        try {
-            if (Build.VERSION.SDK_INT >= 26) {
-                startForegroundService(serviceIntent);
-            } else {
-                startService(serviceIntent);
-            }
-            Log.i("QuickSend", "QuickSendService started OK");
-        } catch (Exception e) {
-            Log.e("QuickSend", "Failed to start QuickSendService", e);
-            Toast.makeText(this, "服务启动失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+        // 启动时按上次记住的模式运行；首次启动先让用户选择
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String savedMode = prefs.getString(KEY_MODE, "");
+        if (savedMode.isEmpty()) {
+            showModeDialog(true);
+        } else {
+            applyMode(savedMode, prefs.getString(KEY_CLIENT_URL, ""), false);
         }
-
-        waitForServer();
-        registerNetworkMonitor();
-        handleShareIntent(getIntent());
     }
 
     /** 监听默认网络切换（流量 <-> Wi-Fi <-> 网线），变化后重算本机地址并通知前端 */
@@ -233,6 +267,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             @Override
             public void run() {
                 if (token != networkChangeToken) return;
+                if ("client".equals(runMode)) return;
                 new Thread(() -> {
                     publishLanIp();
                     final String ip = hotspotHelper == null ? null : hotspotHelper.getLanIp();
@@ -257,6 +292,15 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     /** 处理系统「分享到」「用其他应用打开」进来的文件，交给前台服务分片上传 */
     private void handleShareIntent(Intent intent) {
         if (intent == null) return;
+        if ("client".equals(runMode)) {
+            // 客户端模式没有本地服务，导入无处可去
+            if (!extractShareUris(intent).isEmpty()) {
+                Toast.makeText(this, "客户端模式下不支持导入文件，请切换到服务器模式",
+                        Toast.LENGTH_LONG).show();
+            }
+            intent.setAction(null);
+            return;
+        }
         List<Uri> uris = extractShareUris(intent);
         if (uris.isEmpty()) {
             CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
@@ -356,6 +400,10 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     handlePermissionRequest(url);
                     return true;
                 }
+                if (url != null && url.startsWith("quicksend://mode")) {
+                    handleModeRequest(url);
+                    return true;
+                }
                 return false;  // 返回 false 让 WebView 自己加载 http/https
             }
 
@@ -387,6 +435,11 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 super.onPageFinished(view, url);
                 String title = view.getTitle();
                 Log.i("QuickSend", "WebView page finished: " + url + " title=" + title);
+                if (!"client".equals(runMode) && url != null && url.startsWith("http://127.0.0.1")) {
+                    view.evaluateJavascript(
+                            "if(window.__quicksend&&window.__quicksend.onModeInfo){"
+                                    + "window.__quicksend.onModeInfo({mode:'" + runMode + "'});}", null);
+                }
             }
         });
 
@@ -730,7 +783,9 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private final Runnable lanIpTicker = new Runnable() {
         @Override
         public void run() {
-            new Thread(() -> { syncLanIpIfChanged(); }, "quicksend-ip-tick").start();
+            if (!"client".equals(runMode)) {
+                new Thread(() -> { syncLanIpIfChanged(); }, "quicksend-ip-tick").start();
+            }
             networkHandler.postDelayed(this, 4000);
         }
     };
@@ -751,6 +806,322 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                             + "', ssid:'" + ssid + "', password:'" + pwd + "', active:" + active + "})",
                     null);
         }
+    }
+
+    // === 运行模式：服务器 / 自动 / 客户端 ===
+
+    private int dp(int value) {
+        return Math.round(getResources().getDisplayMetrics().density * value);
+    }
+
+    /** 应用运行模式：server=本机服务器，auto=本机服务器+自动发现，client=只连其它服务器 */
+    private void applyMode(String mode, String url, boolean fromUser) {
+        String m = "client".equals(mode) ? "client" : ("auto".equals(mode) ? "auto" : "server");
+        runMode = m;
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putString(KEY_MODE, m).apply();
+        Log.i("QuickSend", "applyMode: " + m + " url=" + url + " fromUser=" + fromUser);
+
+        if ("client".equals(m)) {
+            clientUrl = url == null ? "" : url;
+            prefs.edit().putString(KEY_CLIENT_URL, clientUrl).apply();
+            stopLocalServer();
+            enterClientMode();
+        } else {
+            clientUrl = "";
+            prefs.edit().putString(KEY_CLIENT_URL, "").apply();
+            showClientBadge(false);
+            stopAutoDiscovery();
+            startServerMode();
+        }
+    }
+
+    private void startServerMode() {
+        splash.setVisibility(View.VISIBLE);
+        splash.setText("QuickSend 服务启动中…");
+        if (!serverStarted) {
+            serverStarted = true;
+            Intent serviceIntent = new Intent(this, QuickSendService.class);
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    startForegroundService(serviceIntent);
+                } else {
+                    startService(serviceIntent);
+                }
+                Log.i("QuickSend", "QuickSendService started OK");
+            } catch (Exception e) {
+                Log.e("QuickSend", "Failed to start QuickSendService", e);
+                Toast.makeText(this, "服务启动失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+            }
+        }
+        waitForServer();
+        registerNetworkMonitor();
+        handleShareIntent(getIntent());
+    }
+
+    /** 切到客户端模式：停掉前台服务（Python 线程在进程内无法安全 kill，切回时复用） */
+    private void stopLocalServer() {
+        unregisterNetworkMonitor();
+        networkHandler.removeCallbacks(lanIpTicker);
+        stopAutoDiscovery();
+        if (serverStarted) {
+            try {
+                stopService(new Intent(this, QuickSendService.class));
+            } catch (Exception ignored) { }
+            serverStarted = false;
+        }
+    }
+
+    private void enterClientMode() {
+        splash.setVisibility(View.GONE);
+        showClientBadge(true);
+        if (clientUrl == null || clientUrl.isEmpty()) {
+            Toast.makeText(this, "请先设置服务器地址", Toast.LENGTH_LONG).show();
+            showModeDialog(false);
+            return;
+        }
+        Log.i("QuickSend", "enter client mode: " + clientUrl);
+        Toast.makeText(this, "客户端模式：" + clientUrl, Toast.LENGTH_SHORT).show();
+        webView.loadUrl(clientUrl);
+    }
+
+    private void showClientBadge(boolean show) {
+        if (clientBadge != null) {
+            clientBadge.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void confirmReturnToServerMode() {
+        if (isFinishing()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("返回服务器模式")
+                .setMessage("退出客户端模式，在本机启动服务器？")
+                .setPositiveButton("切换", (dialog, which) -> applyMode("server", "", true))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** 模式选择框：服务器 / 自动 / 客户端（客户端可输入地址或扫码） */
+    private void showModeDialog(final boolean startup) {
+        if (isFinishing()) return;
+
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(20);
+        box.setPadding(pad, dp(12), pad, dp(4));
+
+        final RadioGroup group = new RadioGroup(this);
+        final RadioButton rbServer = new RadioButton(this);
+        rbServer.setText("服务器模式（本机共享文件）");
+        final RadioButton rbAuto = new RadioButton(this);
+        rbAuto.setText("自动模式（本机共享 + 自动发现其它服务器）");
+        final RadioButton rbClient = new RadioButton(this);
+        rbClient.setText("客户端模式（连接其它服务器）");
+        group.addView(rbServer);
+        group.addView(rbAuto);
+        group.addView(rbClient);
+
+        final LinearLayout urlRow = new LinearLayout(this);
+        urlRow.setOrientation(LinearLayout.HORIZONTAL);
+        urlRow.setGravity(Gravity.CENTER_VERTICAL);
+        final EditText input = new EditText(this);
+        input.setHint("192.168.1.5:5000");
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        input.setText(clientUrl);
+        urlRow.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button scanBtn = new Button(this);
+        scanBtn.setText("扫码");
+        scanBtn.setOnClickListener(v -> {
+            modeUrlInput = input;
+            modeClientRadio = rbClient;
+            startScan();
+        });
+        urlRow.addView(scanBtn);
+
+        TextView hint = new TextView(this);
+        hint.setTextSize(12);
+        hint.setTextColor(0xFF64748B);
+        hint.setText("服务器模式：本机作为共享服务器；自动模式：仍开启本机服务，并自动发现局域网里的其它 QuickSend；客户端模式：不启动本机服务，直接连接指定地址（支持扫码）。");
+        LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hintParams.topMargin = dp(8);
+
+        box.addView(group);
+        box.addView(urlRow);
+        box.addView(hint, hintParams);
+
+        String current = startup
+                ? getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_MODE, "server")
+                : runMode;
+        if ("client".equals(current)) {
+            rbClient.setChecked(true);
+            urlRow.setVisibility(View.VISIBLE);
+        } else if ("auto".equals(current)) {
+            rbAuto.setChecked(true);
+            urlRow.setVisibility(View.GONE);
+        } else {
+            rbServer.setChecked(true);
+            urlRow.setVisibility(View.GONE);
+        }
+        group.setOnCheckedChangeListener((g, id) ->
+                urlRow.setVisibility(rbClient.isChecked() ? View.VISIBLE : View.GONE));
+
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(box);
+
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("选择运行模式")
+                .setView(scroll)
+                .setPositiveButton("确定", null)
+                .setNegativeButton("取消", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                String mode;
+                if (rbClient.isChecked()) mode = "client";
+                else if (rbAuto.isChecked()) mode = "auto";
+                else mode = "server";
+                String url = "";
+                if ("client".equals(mode)) {
+                    url = normalizeUrl(input.getText().toString());
+                    if (url == null) {
+                        Toast.makeText(this, "请输入正确的服务器地址，例如 192.168.1.5:5000", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                }
+                dialog.dismiss();
+                applyMode(mode, url, true);
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v -> {
+                dialog.dismiss();
+                if (startup) applyMode("server", "", true);
+            });
+        });
+        dialog.setOnCancelListener(d -> {
+            if (startup) applyMode("server", "", true);
+        });
+        dialog.show();
+    }
+
+    /** quicksend://mode?action=choose|status|server|auto|client&url=... */
+    private void handleModeRequest(String url) {
+        try {
+            Uri uri = Uri.parse(url);
+            String action = uri.getQueryParameter("action");
+            if ("status".equals(action)) {
+                if (webView != null) {
+                    webView.evaluateJavascript(
+                            "if(window.__quicksend&&window.__quicksend.onModeInfo){"
+                                    + "window.__quicksend.onModeInfo({mode:'" + runMode + "'});}", null);
+                }
+                return;
+            }
+            if ("client".equals(action)) {
+                String target = normalizeUrl(uri.getQueryParameter("url"));
+                if (target == null) {
+                    Toast.makeText(this, "服务器地址无效", Toast.LENGTH_LONG).show();
+                    showModeDialog(false);
+                    return;
+                }
+                applyMode("client", target, true);
+                return;
+            }
+            if ("server".equals(action)) {
+                applyMode("server", "", true);
+                return;
+            }
+            if ("auto".equals(action)) {
+                applyMode("auto", "", true);
+                return;
+            }
+            showModeDialog(false);
+        } catch (Exception ignored) { }
+    }
+
+    private void startScan() {
+        try {
+            IntentIntegrator integrator = IntentIntegrator.forActivity(this);
+            integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
+            integrator.setPrompt("扫描 QuickSend 地址二维码");
+            integrator.setBeepEnabled(false);
+            integrator.setOrientationLocked(false);
+            integrator.initiateScan();
+        } catch (Throwable t) {
+            Toast.makeText(this, "无法打开扫码：" + t.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** 把 "192.168.1.5" / "192.168.1.5:5000" / 二维码文本规范成 http://host[:port] */
+    private String normalizeUrl(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.isEmpty()) return null;
+        int idx = s.indexOf("http://");
+        if (idx < 0) idx = s.indexOf("https://");
+        if (idx > 0) s = s.substring(idx);
+        boolean https = s.startsWith("https://");
+        if (!https && !s.startsWith("http://")) s = "http://" + s;
+        try {
+            String scheme = https ? "https" : "http";
+            String rest = s.substring(s.indexOf("//") + 2);
+            String path = "";
+            int slash = rest.indexOf('/');
+            if (slash >= 0) {
+                path = rest.substring(slash);
+                rest = rest.substring(0, slash);
+            }
+            if (rest.isEmpty() || rest.startsWith(":")) return null;
+            boolean hasPort = rest.contains(":");
+            return scheme + "://" + rest + (hasPort ? "" : ":5000") + path;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 自动模式：周期性 UDP 广播发现其它 QuickSend 服务器，发现后交给前端提示 */
+    private void startAutoDiscovery() {
+        if (autoDiscoveryRunning) return;
+        autoDiscoveryRunning = true;
+        new Thread(() -> {
+            try {
+                Thread.sleep(1500);
+            } catch (InterruptedException e) {
+                return;
+            }
+            while (autoDiscoveryRunning && "auto".equals(runMode)) {
+                java.util.List<String> servers = DiscoveryClient.discover(1600);
+                final String self = currentEffectiveIp();
+                for (String addr : servers) {
+                    int colon = addr.lastIndexOf(':');
+                    String ip = colon > 0 ? addr.substring(0, colon) : addr;
+                    if (ip.startsWith("127.")) continue;
+                    if (self != null && self.equals(ip)) continue;   // 自己发出的广播
+                    if (DiscoveryClient.isLocalAddress(ip)) continue; // 本机网卡地址（自己）
+                    final String foundUrl = "http://" + addr;
+                    final String foundIp = ip;
+                    runOnUiThread(() -> {
+                        if (webView != null && "auto".equals(runMode)) {
+                            Log.i("QuickSend", "discovered server: " + foundUrl);
+                            webView.evaluateJavascript(
+                                    "if(window.__quicksend&&window.__quicksend.onServerFound){"
+                                            + "window.__quicksend.onServerFound({url:'" + jsEscape(foundUrl)
+                                            + "',ip:'" + jsEscape(foundIp) + "'});}", null);
+                        }
+                    });
+                    break;
+                }
+                try {
+                    Thread.sleep(20000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        }, "quicksend-discovery").start();
+    }
+
+    private void stopAutoDiscovery() {
+        autoDiscoveryRunning = false;
     }
 
     // === 请求权限：quicksend://request-permission?name=NEARBY_WIFI_DEVICES ===
@@ -909,6 +1280,8 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     }
 
     private void waitForServer() {
+        if (serverProbing) return;
+        serverProbing = true;
         new Thread(() -> {
             long deadline = System.currentTimeMillis() + 90000L;
             boolean ready = false;
@@ -925,6 +1298,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             }
             boolean finalReady = ready;
             runOnUiThread(() -> {
+                serverProbing = false;
                 if (finalReady) {
                     // === 诊断：Java HTTP 直接拉首页，看 Flask 返回什么 ===
                     new Thread(() -> {
@@ -963,12 +1337,19 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     headers.put("X-QuickSend-Build", String.valueOf(BuildConfig.BUILD_NUMBER));
                     headers.put("X-Requested-With", "QuickSend");
                     webView.loadUrl(loadUrl, headers);
+                    // 自动模式：本机服务照常运行，同时寻找局域网里其它 QuickSend
+                    if ("auto".equals(runMode)) {
+                        startAutoDiscovery();
+                    }
                     // Also inject via evaluateJavascript shortly after page loads
                     new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
                         if (webView != null) {
                             webView.evaluateJavascript(injectJs, null);
                             webView.evaluateJavascript(
                                     "if(window.__quicksend) window.__quicksend.build = " + BuildConfig.BUILD_NUMBER + ";", null);
+                            webView.evaluateJavascript(
+                                    "if(window.__quicksend&&window.__quicksend.onModeInfo){"
+                                            + "window.__quicksend.onModeInfo({mode:'" + runMode + "'});}", null);
                         }
                     }, 1500);
                 } else {
@@ -1086,6 +1467,24 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        // 扫码结果（ZXing）→ 填入客户端地址
+        try {
+            IntentResult scan = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
+            if (scan != null) {
+                String contents = scan.getContents();
+                if (contents != null && !contents.trim().isEmpty()) {
+                    String normalized = normalizeUrl(contents);
+                    if (normalized != null && modeUrlInput != null) {
+                        modeUrlInput.setText(normalized);
+                        if (modeClientRadio != null) modeClientRadio.setChecked(true);
+                    } else {
+                        Toast.makeText(this, "二维码内容不是有效地址：" + contents, Toast.LENGTH_LONG).show();
+                    }
+                }
+                return;
+            }
+        } catch (Throwable ignored) { }
+
         if (requestCode == REQ_FILE) {
             Uri[] results = null;
             if (resultCode == RESULT_OK && data != null) {
@@ -1136,6 +1535,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     @Override
     protected void onResume() {
         super.onResume();
+        if ("client".equals(runMode)) return;   // 客户端模式没有本地服务和地址需要刷新
         // 回到前台时补一次地址刷新（有些机型不回调网络变化）
         scheduleNetworkRefresh();
         networkHandler.removeCallbacks(lanIpTicker);

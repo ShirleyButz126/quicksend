@@ -1615,13 +1615,17 @@ const SettingsModal = ({
   onClose,
   config,
   onSave,
-  onRefreshFiles
+  onRefreshFiles,
+  runMode,
+  onSwitchMode
 }: {
   isOpen: boolean;
   onClose: () => void;
   config: IpResponse;
   onSave: (newConfig: Partial<IpResponse>) => void;
   onRefreshFiles?: () => void;
+  runMode?: string;
+  onSwitchMode?: () => void;
 }) => {
   const [uploadDir, setUploadDir] = useState(config.upload_dir || '');
   const [mode, setMode] = useState(config.mode || 'share');
@@ -1770,6 +1774,26 @@ const SettingsModal = ({
                 : '单向传输模式：其他设备仅可上传文件，不可查看已分享内容（仅本机可见）。'}
             </p>
           </div>
+
+          {/* 运行模式（仅 APK）*/}
+          {typeof window !== 'undefined' && typeof (window as any).__QUICKSEND_BUILD__ === 'number' && (
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">运行模式</label>
+              <button
+                onClick={onSwitchMode}
+                className="w-full px-3 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 hover:bg-slate-100 transition-colors flex items-center justify-between"
+              >
+                <span>
+                  当前：
+                  {runMode === 'client' ? '客户端模式' : runMode === 'auto' ? '自动模式' : '服务器模式'}
+                </span>
+                <span className="text-xs text-indigo-600 font-medium">切换…</span>
+              </button>
+              <p className="text-xs text-slate-500 mt-2 ml-1 leading-relaxed">
+                服务器模式：本机共享文件；自动模式：本机共享并自动发现局域网其它服务器；客户端模式：连接其它服务器地址（支持扫码）。
+              </p>
+            </div>
+          )}
 
           {/* Groups: Remote create setting */}
           <div>
@@ -2710,6 +2734,8 @@ const Home = () => {
   const [toast, setToast] = useState<{ message: string, type: 'info' | 'error' | 'success' } | null>(null);
   const showToast = (message: string, type: 'info' | 'error' | 'success' = 'info') => setToast({ message, type });
   const [showSettings, setShowSettings] = useState(false);
+  const [runMode, setRunMode] = useState<'server' | 'auto' | 'client'>('server');
+  const [foundServer, setFoundServer] = useState('');
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [previewFile, setPreviewFile] = useState<{ file: FileItem, password?: string } | null>(null);
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -2776,10 +2802,26 @@ const Home = () => {
       }
       return 'exit';
     };
+    // 原生层回传的当前运行模式 / 自动发现到的服务器
+    w.__quicksend.onModeInfo = (data: any) => {
+      if (data?.mode === 'client' || data?.mode === 'auto' || data?.mode === 'server') {
+        setRunMode(data.mode);
+      }
+    };
+    w.__quicksend.onServerFound = (data: any) => {
+      if (data?.url) setFoundServer(data.url);
+    };
+    // 页面加载后向原生层要一次当前模式
+    const modeTimer = setTimeout(() => {
+      try { window.location.href = 'quicksend://mode?action=status'; } catch { }
+    }, 800);
     const timer = setInterval(() => {
       refreshIpConfig();
     }, 5000);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(modeTimer);
+      clearInterval(timer);
+    };
   }, []);
 
   const ipAddress = (() => {
@@ -3376,7 +3418,30 @@ const Home = () => {
         config={config || { ip: '', port: 0 } as IpResponse}
         onSave={handleSaveConfig}
         onRefreshFiles={fetchFiles}
+        runMode={runMode}
+        onSwitchMode={() => { window.location.href = 'quicksend://mode?action=choose'; }}
       />
+      {foundServer && (
+        <div className="sticky top-0 z-40 bg-indigo-600 text-white px-4 py-2.5 flex items-center gap-3 shadow-md">
+          <span className="flex-1 text-xs sm:text-sm truncate">
+            发现局域网服务器 <span className="font-mono">{foundServer}</span>
+          </span>
+          <button
+            onClick={() => {
+              try { window.location.href = `quicksend://mode?action=client&url=${encodeURIComponent(foundServer)}`; } catch { }
+            }}
+            className="px-3 py-1 text-xs font-medium bg-white text-indigo-700 rounded-md hover:bg-indigo-50 transition-colors"
+          >
+            连接
+          </button>
+          <button
+            onClick={() => setFoundServer('')}
+            className="px-3 py-1 text-xs font-medium bg-white/15 hover:bg-white/25 rounded-md transition-colors"
+          >
+            忽略
+          </button>
+        </div>
+      )}
       <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-6 sm:pt-12">
 
         <div className="flex flex-col lg:flex-row gap-8 items-start">

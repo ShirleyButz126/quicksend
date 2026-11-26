@@ -283,6 +283,54 @@ def get_local_ip_fast():
     _LOCAL_IP_CACHE['ts'] = time.time()
     return ip
 
+DISCOVERY_PORT = 5001
+_DISCOVERY_KEYWORD = b'QUICKSEND_DISCOVER'
+
+
+def _discovery_responder():
+    """局域网发现应答：收到 QUICKSEND_DISCOVER 就回本机端口，供客户端/自动模式寻找服务器"""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', DISCOVERY_PORT))
+        sock.settimeout(1.0)
+        print(f'[发现] UDP 发现服务已监听 {DISCOVERY_PORT}')
+        while True:
+            try:
+                data, addr = sock.recvfrom(256)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            if _DISCOVERY_KEYWORD not in data:
+                continue
+            try:
+                payload = json.dumps({
+                    'app': 'quicksend',
+                    'port': GLOBAL_PORT,
+                    'ip': get_local_ip(),
+                    'name': socket.gethostname(),
+                }, ensure_ascii=False).encode('utf-8')
+                sock.sendto(payload, addr)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f'[发现] UDP 发现服务启动失败: {e}')
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def start_discovery_responder():
+    t = threading.Thread(target=_discovery_responder, daemon=True)
+    t.start()
+    return t
+
+
 def find_free_port(start=5000, end=5100):
     """
     Find a free port in the range [start, end].
@@ -1987,6 +2035,10 @@ if __name__ == '__main__':
     
     log('[启动] 服务准备')
     log(f"[启动] 耗时: {int((time.time()-START_TIME)*1000)}ms, 端口: {GLOBAL_PORT}, Android: {IS_ANDROID}")
+    try:
+        start_discovery_responder()
+    except Exception as _e:
+        log(f'[发现] 启动 UDP 发现服务失败: {_e}')
 
     def start_flask():
         app.run(host='0.0.0.0', port=GLOBAL_PORT, debug=False, threaded=True, use_reloader=False)

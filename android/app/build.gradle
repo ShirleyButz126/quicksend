@@ -101,6 +101,8 @@ chaquopy {
 dependencies {
     implementation 'androidx.core:core:1.13.1'
     implementation 'androidx.core:core-ktx:1.13.1'
+    // 客户端模式扫码连接（不依赖 GMS）
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
 }
 
 def qassetsDir = layout.buildDirectory.dir('generated/qassets').get().asFile

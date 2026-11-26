@@ -38,6 +38,8 @@ public class QuickSendService extends Service {
     private static final int SHARE_NOTIFICATION_ID = 2;
 
     private volatile boolean started = false;
+    // Python 运行在应用进程内，Service 重启（例如客户端模式切回服务器模式）时不能重复启动 Flask
+    private static volatile boolean pythonLaunched = false;
     private volatile boolean shareRunning = false;
     private long lastShareNotifyAt = 0L;
     private final List<Uri> pendingShareUris = Collections.synchronizedList(new ArrayList<>());
@@ -61,7 +63,10 @@ public class QuickSendService extends Service {
         }
         if (!started) {
             started = true;
-            new Thread(this::startPython, "quicksend-python").start();
+            if (!pythonLaunched) {
+                pythonLaunched = true;
+                new Thread(this::startPython, "quicksend-python").start();
+            }
         }
         if (intent != null && ACTION_SHARE_UPLOAD.equals(intent.getAction())) {
             ArrayList<Uri> uris = intent.getParcelableArrayListExtra(EXTRA_URIS);

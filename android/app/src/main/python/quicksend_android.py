@@ -78,6 +78,11 @@ def start(data_dir, static_dir, port):
 
     import app as quicksend_app
     quicksend_app.GLOBAL_PORT = int(port)
+    # 启动 UDP 局域网发现应答（客户端/自动模式据此寻找服务器）
+    try:
+        quicksend_app.start_discovery_responder()
+    except Exception as e:
+        print(f'[发现] 启动失败: {e}')
     quicksend_app.app.run(
         host='0.0.0.0',
         port=int(port),
