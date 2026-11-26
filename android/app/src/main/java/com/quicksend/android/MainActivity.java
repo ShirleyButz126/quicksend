@@ -1041,7 +1041,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
     private void startScan() {
         try {
-            IntentIntegrator integrator = IntentIntegrator.forActivity(this);
+            IntentIntegrator integrator = new IntentIntegrator(this);
             integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
             integrator.setPrompt("扫描 QuickSend 地址二维码");
             integrator.setBeepEnabled(false);
