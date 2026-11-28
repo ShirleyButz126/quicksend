@@ -27,6 +27,7 @@ import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
@@ -75,15 +76,15 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private static final String PREFS_NAME = "quicksend_prefs";
     private static final String KEY_MODE = "run_mode";
     private static final String KEY_CLIENT_URL = "client_url";
+    private static final String KEY_TOOL_X = "float_tools_x";
+    private static final String KEY_TOOL_Y = "float_tools_y";
 
     private WebView webView;
     private TextView splash;
     private TextView clientBadge;
-    private ImageView clientScanButton;
-    private TextView clientRefreshButton;
+    private LinearLayout clientTools;
     private boolean scanForClientSwitch = false;
     private int clientRetryCount = 0;
-    private long clientSwitchAt = 0L;
     private boolean clientRetryPending = false;
     private boolean clientRetryToastShown = false;
     private FrameLayout rootView;
@@ -155,7 +156,8 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         clientBadge.setText("⌂ 服务器模式");
         clientBadge.setTextSize(12);
         clientBadge.setTextColor(Color.WHITE);
-        clientBadge.setBackgroundColor(0xCC0F172A);
+        clientBadge.setBackgroundResource(R.drawable.bg_badge_dark);
+        clientBadge.setElevation(dp(4));
         clientBadge.setPadding(dp(12), dp(7), dp(12), dp(7));
         FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -165,35 +167,38 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         clientBadge.setOnClickListener(v -> confirmReturnToServerMode());
         rootView.addView(clientBadge, badgeParams);
 
-        // 客户端模式：右上角扫码按钮，直接扫码切换连接的服务器
-        clientScanButton = new ImageView(this);
-        clientScanButton.setImageResource(R.drawable.ic_scan_qr);
-        clientScanButton.setBackgroundResource(R.drawable.bg_badge_dark);
-        clientScanButton.setPadding(dp(10), dp(10), dp(10), dp(10));
-        clientScanButton.setContentDescription("扫码切换服务器");
-        clientScanButton.setVisibility(View.GONE);
-        clientScanButton.setOnClickListener(v -> startClientScan());
-        FrameLayout.LayoutParams scanParams = new FrameLayout.LayoutParams(dp(44), dp(44));
-        scanParams.gravity = Gravity.TOP | Gravity.END;
-        scanParams.setMargins(0, dp(14), dp(16), 0);
-        rootView.addView(clientScanButton, scanParams);
+        // 客户端模式：右上角浮动工具条（扫码 / 刷新），可拖动并记住位置
+        clientTools = new LinearLayout(this);
+        clientTools.setOrientation(LinearLayout.VERTICAL);
+        clientTools.setBackgroundResource(R.drawable.bg_badge_dark);
+        clientTools.setElevation(dp(4));
+        clientTools.setVisibility(View.GONE);
 
-        // 客户端模式：扫码按钮下方再加一个刷新按钮，网络刚切换/服务器刚启动时手动重试
-        clientRefreshButton = new TextView(this);
-        clientRefreshButton.setText("↻");
-        clientRefreshButton.setTextSize(20);
-        clientRefreshButton.setTextColor(Color.WHITE);
-        clientRefreshButton.setGravity(Gravity.CENTER);
-        clientRefreshButton.setBackgroundResource(R.drawable.bg_badge_dark);
-        clientRefreshButton.setContentDescription("刷新页面");
-        clientRefreshButton.setVisibility(View.GONE);
-        clientRefreshButton.setOnClickListener(v -> {
-            if (webView != null) webView.reload();
-        });
-        FrameLayout.LayoutParams refreshParams = new FrameLayout.LayoutParams(dp(44), dp(44));
-        refreshParams.gravity = Gravity.TOP | Gravity.END;
-        refreshParams.setMargins(0, dp(66), dp(16), 0);
-        rootView.addView(clientRefreshButton, refreshParams);
+        ImageView scanIcon = new ImageView(this);
+        scanIcon.setImageResource(R.drawable.ic_scan_qr);
+        scanIcon.setPadding(dp(11), dp(11), dp(11), dp(11));
+        clientTools.addView(scanIcon, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+        View toolsDivider = new View(this);
+        toolsDivider.setBackgroundColor(0x33FFFFFF);
+        LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        dividerParams.setMargins(dp(10), 0, dp(10), 0);
+        clientTools.addView(toolsDivider, dividerParams);
+
+        TextView refreshIcon = new TextView(this);
+        refreshIcon.setText("\u21bb");
+        refreshIcon.setTextSize(20);
+        refreshIcon.setTextColor(Color.WHITE);
+        refreshIcon.setGravity(Gravity.CENTER);
+        clientTools.addView(refreshIcon, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+        FrameLayout.LayoutParams toolsParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        toolsParams.gravity = Gravity.TOP | Gravity.END;
+        toolsParams.setMargins(0, dp(14), dp(16), 0);
+        rootView.addView(clientTools, toolsParams);
+        makeClientToolsDraggable();
 
         setContentView(rootView);
 
@@ -509,10 +514,8 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 super.onPageFinished(view, url);
                 String title = view.getTitle();
                 Log.i("QuickSend", "WebView page finished: " + url + " title=" + title);
-                if ("client".equals(runMode) && url != null && clientUrl != null
-                        && url.startsWith(clientUrl)) {
-                    clientRetryCount = 0;
-                }
+                // 注意：加载失败的错误页也会走到这里，所以不能在这里重置重试计数，
+                // 否则退避间隔会退化成固定 2 秒、重试次数失控。
                 if (!"client".equals(runMode) && url != null && url.startsWith("http://127.0.0.1")) {
                     view.evaluateJavascript(
                             "if(window.__quicksend&&window.__quicksend.onModeInfo){"
@@ -968,21 +971,84 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
     /** 每次进入/切换客户端地址时重置自动重试状态 */
     private void resetClientRetry() {
-        clientSwitchAt = System.currentTimeMillis();
         clientRetryCount = 0;
         clientRetryPending = false;
         clientRetryToastShown = false;
+    }
+
+    /** 工具条可拖动（避开对方页面按钮）；轻点上半区扫码、下半区刷新 */
+    private void makeClientToolsDraggable() {
+        final float[] down = new float[2];
+        final float[] origin = new float[2];
+        final boolean[] dragging = new boolean[1];
+        clientTools.setOnTouchListener((v, e) -> {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    down[0] = e.getRawX();
+                    down[1] = e.getRawY();
+                    origin[0] = v.getX();
+                    origin[1] = v.getY();
+                    dragging[0] = false;
+                    v.setAlpha(0.7f);
+                    return true;
+                case MotionEvent.ACTION_MOVE: {
+                    float dx = e.getRawX() - down[0];
+                    float dy = e.getRawY() - down[1];
+                    if (!dragging[0] && Math.hypot(dx, dy) > dp(6)) dragging[0] = true;
+                    if (dragging[0]) {
+                        float maxX = Math.max(0, rootView.getWidth() - v.getWidth());
+                        float maxY = Math.max(0, rootView.getHeight() - v.getHeight());
+                        v.setX(Math.max(0, Math.min(origin[0] + dx, maxX)));
+                        v.setY(Math.max(0, Math.min(origin[1] + dy, maxY)));
+                    }
+                    return true;
+                }
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    v.setAlpha(1f);
+                    if (dragging[0]) {
+                        saveClientToolsPos(v.getX(), v.getY());
+                    } else if (e.getActionMasked() == MotionEvent.ACTION_UP) {
+                        if (e.getY() < v.getHeight() / 2f) {
+                            startClientScan();
+                        } else if (webView != null) {
+                            webView.reload();
+                        }
+                    }
+                    return true;
+                default:
+                    return false;
+            }
+        });
+        rootView.post(this::restoreClientToolsPos);
+    }
+
+    private void saveClientToolsPos(float x, float y) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putFloat(KEY_TOOL_X, x).putFloat(KEY_TOOL_Y, y).apply();
+    }
+
+    private void restoreClientToolsPos() {
+        if (clientTools == null || rootView.getWidth() == 0) return;
+        SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (!p.contains(KEY_TOOL_X)) return;
+        float x = p.getFloat(KEY_TOOL_X, -1);
+        float y = p.getFloat(KEY_TOOL_Y, -1);
+        if (x < 0 || y < 0) return;
+        float w = clientTools.getWidth() > 0 ? clientTools.getWidth() : dp(44);
+        float h = clientTools.getHeight() > 0 ? clientTools.getHeight() : dp(89);
+        float maxX = Math.max(0, rootView.getWidth() - w);
+        float maxY = Math.max(0, rootView.getHeight() - h);
+        clientTools.setX(Math.min(x, maxX));
+        clientTools.setY(Math.min(y, maxY));
     }
 
     private void showClientBadge(boolean show) {
         if (clientBadge != null) {
             clientBadge.setVisibility(show ? View.VISIBLE : View.GONE);
         }
-        if (clientScanButton != null) {
-            clientScanButton.setVisibility(show ? View.VISIBLE : View.GONE);
-        }
-        if (clientRefreshButton != null) {
-            clientRefreshButton.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (clientTools != null) {
+            clientTools.setVisibility(show ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -1168,15 +1234,16 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
 
     /**
      * 刚切换服务器时对方可能还没启动完 / 手机还没连上对方热点：
-     * 主框架加载失败后的 30 秒内自动重试，超过则交给用户点刷新按钮。
+     * 主框架加载失败后按 2s / 5s / 10s / 20s 退避重试 4 次（约 37 秒），
+     * 之后交给用户点右上角刷新按钮。
      */
     private void scheduleClientRetry() {
         if (!"client".equals(runMode) || isFinishing() || clientRetryPending) return;
-        long since = System.currentTimeMillis() - clientSwitchAt;
-        if (since > 30000L) return;
+        if (clientRetryCount >= 4) return;
+        int[] delays = {2000, 5000, 10000, 20000};
+        int delay = delays[clientRetryCount];
         clientRetryCount++;
         clientRetryPending = true;
-        int delay = Math.min(6000, 2000 * clientRetryCount);
         if (!clientRetryToastShown) {
             clientRetryToastShown = true;
             Toast.makeText(this, "服务器暂未就绪，正在自动重试…", Toast.LENGTH_SHORT).show();
