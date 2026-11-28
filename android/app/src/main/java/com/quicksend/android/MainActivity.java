@@ -39,6 +39,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -78,6 +79,8 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private WebView webView;
     private TextView splash;
     private TextView clientBadge;
+    private ImageView clientScanButton;
+    private boolean scanForClientSwitch = false;
     private FrameLayout rootView;
     private ValueCallback<Uri[]> fileCallback;
 
@@ -156,6 +159,19 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         clientBadge.setVisibility(View.GONE);
         clientBadge.setOnClickListener(v -> confirmReturnToServerMode());
         rootView.addView(clientBadge, badgeParams);
+
+        // 客户端模式：右上角扫码按钮，直接扫码切换连接的服务器
+        clientScanButton = new ImageView(this);
+        clientScanButton.setImageResource(R.drawable.ic_scan_qr);
+        clientScanButton.setBackgroundResource(R.drawable.bg_badge_dark);
+        clientScanButton.setPadding(dp(10), dp(10), dp(10), dp(10));
+        clientScanButton.setContentDescription("扫码切换服务器");
+        clientScanButton.setVisibility(View.GONE);
+        clientScanButton.setOnClickListener(v -> startClientScan());
+        FrameLayout.LayoutParams scanParams = new FrameLayout.LayoutParams(dp(44), dp(44));
+        scanParams.gravity = Gravity.TOP | Gravity.END;
+        scanParams.setMargins(0, dp(14), dp(16), 0);
+        rootView.addView(clientScanButton, scanParams);
 
         setContentView(rootView);
 
@@ -919,6 +935,9 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         if (clientBadge != null) {
             clientBadge.setVisibility(show ? View.VISIBLE : View.GONE);
         }
+        if (clientScanButton != null) {
+            clientScanButton.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
     }
 
     private void confirmReturnToServerMode() {
@@ -1080,6 +1099,21 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         } catch (Throwable t) {
             Toast.makeText(this, "无法打开扫码：" + t.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    /** 客户端模式：扫码后直接切换连接的服务器 */
+    private void startClientScan() {
+        scanForClientSwitch = true;
+        startScan();
+    }
+
+    /** 切换到扫码得到的服务器地址，并记住它 */
+    private void switchClientServer(String url) {
+        clientUrl = url;
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(KEY_CLIENT_URL, url).apply();
+        Toast.makeText(this, "已切换服务器：" + url, Toast.LENGTH_SHORT).show();
+        Log.i("QuickSend", "client switch to " + url);
+        if (webView != null) webView.loadUrl(url);
     }
 
     /** 把 "192.168.1.5" / "192.168.1.5:5000" / 二维码文本规范成 http://host[:port] */
@@ -1502,9 +1536,17 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             IntentResult scan = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
             if (scan != null) {
                 String contents = scan.getContents();
+                boolean forSwitch = scanForClientSwitch;
+                scanForClientSwitch = false;
                 if (contents != null && !contents.trim().isEmpty()) {
                     String normalized = normalizeUrl(contents);
-                    if (normalized != null && modeUrlInput != null) {
+                    if (forSwitch) {
+                        if (normalized != null) {
+                            switchClientServer(normalized);
+                        } else {
+                            Toast.makeText(this, "二维码内容不是有效地址：" + contents, Toast.LENGTH_LONG).show();
+                        }
+                    } else if (normalized != null && modeUrlInput != null) {
                         modeUrlInput.setText(normalized);
                         if (modeClientRadio != null) modeClientRadio.setChecked(true);
                     } else {
