@@ -993,7 +993,7 @@ const UserProfileCard = ({
               ? '已切换为热点地址：其他设备连上本机热点后，用此地址访问。'
               : '在同一 Wi-Fi 下的设备浏览器中输入此地址即可互传文件。'}
           </p>
-          {isHost && accessKey && (
+          {accessKey && (
             <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500">
               <span>访问码</span>
               <span className="font-mono font-semibold tracking-[0.18em] text-slate-800">{accessKey}</span>

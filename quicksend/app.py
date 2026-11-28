@@ -1053,7 +1053,7 @@ def api_ip():
             'version': VERSION,
             'build': request.headers.get('X-QuickSend-Build', ''),
             'access_enabled': ACCESS_ENABLED,
-            'access_key': ACCESS_KEY if _is_local_request() else '',
+            'access_key': ACCESS_KEY if (_is_local_request() or _access_key_valid()) else '',
         })
     except Exception:
         return jsonify({
@@ -1068,7 +1068,7 @@ def api_ip():
             'version': VERSION,
             'build': request.headers.get('X-QuickSend-Build', ''),
             'access_enabled': ACCESS_ENABLED,
-            'access_key': ACCESS_KEY if _is_local_request() else '',
+            'access_key': ACCESS_KEY if (_is_local_request() or _access_key_valid()) else '',
         })
 
 @app.route('/api/config', methods=['POST'])
@@ -2220,6 +2220,8 @@ if __name__ == '__main__':
     print(f"   本地访问: http://127.0.0.1:{GLOBAL_PORT}")
     if local_ip and local_ip != '127.0.0.1':
         print(f"   局域网:  http://{local_ip}:{GLOBAL_PORT}")
+    if ACCESS_ENABLED:
+        print(f"   访问码:  {ACCESS_KEY}    （其它设备手输地址后需要输入；扫码会自动带上）")
     
     if IS_HEADLESS:
         # Headless / Android: 后台常驻，不调 webbrowser，不阻塞 input

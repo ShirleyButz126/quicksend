@@ -5,6 +5,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 import android.util.Log;
+import android.webkit.CookieManager;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -62,7 +63,27 @@ class ShareUploadClient {
             b = b.substring(0, b.length() - 1);
         }
         this.base = b.isEmpty() ? LOCAL_BASE : b;
+        // 地址里没带 ?k= 时，尝试复用 WebView 里已经解锁的 Cookie（用户在页面上输过访问码）
+        if (k.isEmpty()) {
+            k = cookieAccessKey(this.base);
+        }
         this.key = k;
+    }
+
+    /** 从 WebView Cookie 里取 qs_access（服务端访问码），用于原生上传 */
+    private static String cookieAccessKey(String baseUrl) {
+        try {
+            String cookies = CookieManager.getInstance().getCookie(baseUrl);
+            if (cookies == null || cookies.isEmpty()) return "";
+            for (String part : cookies.split(";")) {
+                String[] kv = part.trim().split("=", 2);
+                if (kv.length == 2 && "qs_access".equals(kv[0].trim())) {
+                    return kv[1].trim();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
     }
 
     /** 服务端开了访问码时，上传请求必须带上，否则 401 */
@@ -207,6 +228,7 @@ class ShareUploadClient {
         }
         int code = conn.getResponseCode();
         String text = readAll(code >= 400 ? conn.getErrorStream() : conn.getInputStream());
+        if (code == 401) throw new IOException("对方开启了访问码：请先在页面输入访问码，或扫描带访问码的二维码");
         if (code != 200) throw new IOException("分片 " + index + " HTTP " + code + " " + trim(text));
     }
 
@@ -225,6 +247,7 @@ class ShareUploadClient {
         }
         int code = conn.getResponseCode();
         String text = readAll(code >= 400 ? conn.getErrorStream() : conn.getInputStream());
+        if (code == 401) throw new IOException("对方开启了访问码：请先在页面输入访问码，或扫描带访问码的二维码");
         if (code != expect) throw new IOException(path + " HTTP " + code + " " + trim(text));
         if (text.isEmpty()) return new JSONObject();
         try {
