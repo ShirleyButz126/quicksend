@@ -33,17 +33,43 @@ class ShareUploadClient {
     private static final String LOCAL_BASE = "http://127.0.0.1:" + QuickSendService.PORT;
 
     private final String base;
+    private final String key;
 
     ShareUploadClient() {
-        this(null);
+        this(null, null);
     }
 
     ShareUploadClient(String baseUrl) {
+        this(baseUrl, null);
+    }
+
+    ShareUploadClient(String baseUrl, String accessKey) {
         String b = baseUrl == null ? "" : baseUrl.trim();
+        String k = accessKey == null ? "" : accessKey.trim();
+        // 扫描到的地址可能带 ?k=访问码：拆出来当请求头，地址本身不能带查询参数
+        if (b.contains("?")) {
+            try {
+                Uri u = Uri.parse(b);
+                String qk = u.getQueryParameter("k");
+                if (k.isEmpty() && qk != null) k = qk.trim();
+            } catch (Exception ignored) {
+            }
+            int q = b.indexOf('?');
+            b = b.substring(0, q);
+        }
+        if (b.contains("#")) b = b.substring(0, b.indexOf('#'));
         while (b.endsWith("/")) {
             b = b.substring(0, b.length() - 1);
         }
         this.base = b.isEmpty() ? LOCAL_BASE : b;
+        this.key = k;
+    }
+
+    /** 服务端开了访问码时，上传请求必须带上，否则 401 */
+    private void applyAccessKey(HttpURLConnection conn) {
+        if (key != null && !key.isEmpty()) {
+            conn.setRequestProperty("X-QuickSend-Key", key);
+        }
     }
 
     interface Listener {
@@ -171,6 +197,7 @@ class ShareUploadClient {
         conn.setDoOutput(true);
         conn.setFixedLengthStreamingMode(total);
         conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        applyAccessKey(conn);
         try (OutputStream out = conn.getOutputStream()) {
             out.write(head1);
             out.write(head2);
@@ -192,6 +219,7 @@ class ShareUploadClient {
         conn.setDoOutput(true);
         conn.setFixedLengthStreamingMode(payload.length);
         conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        applyAccessKey(conn);
         try (OutputStream out = conn.getOutputStream()) {
             out.write(payload);
         }

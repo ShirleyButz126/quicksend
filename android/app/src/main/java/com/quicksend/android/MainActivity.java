@@ -356,6 +356,7 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             uploadIntent.setAction(QuickSendService.ACTION_SHARE_UPLOAD);
             uploadIntent.putParcelableArrayListExtra(QuickSendService.EXTRA_URIS, new ArrayList<>(clientUris));
             uploadIntent.putExtra(QuickSendService.EXTRA_UPLOAD_BASE, base);
+            uploadIntent.putExtra(QuickSendService.EXTRA_UPLOAD_KEY, clientAccessKey());
             uploadIntent.putExtra(QuickSendService.EXTRA_CLIENT_ONLY, true);
             try {
                 if (Build.VERSION.SDK_INT >= 26) {
@@ -1280,6 +1281,17 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
             return scheme + "://" + rest + (hasPort ? "" : ":5000") + path;
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /** 从客户端地址里取出扫码带来的访问码 ?k=xxxxxx */
+    private String clientAccessKey() {
+        try {
+            String raw = clientUrl == null ? "" : clientUrl;
+            String k = Uri.parse(raw).getQueryParameter("k");
+            return k == null ? "" : k.trim();
+        } catch (Exception e) {
+            return "";
         }
     }
 

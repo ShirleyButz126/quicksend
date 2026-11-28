@@ -17,6 +17,8 @@ export interface IpResponse {
   use_source_date?: boolean;
   version?: string;
   build?: string;
+  access_enabled?: boolean;
+  access_key?: string;
 }
 
 export interface TextItem {

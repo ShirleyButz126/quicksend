@@ -734,6 +734,7 @@ const UserProfileCard = ({
   onOpenSettings,
   version,
   build,
+  accessKey,
   onRefreshIp
 }: {
   ipAddress: string | null,
@@ -745,6 +746,7 @@ const UserProfileCard = ({
   onOpenSettings?: () => void,
   version?: string,
   build?: string,
+  accessKey?: string,
   onRefreshIp?: () => void
 }) => {
   const [copied, setCopied] = useState(false);
@@ -858,6 +860,12 @@ const UserProfileCard = ({
   const hotspotUrl = hotspotIp ? `http://${hotspotIp}:5000` : '';
   const displayAddress = hotspotStatus === 'running' && hotspotUrl ? hotspotUrl : ipAddress;
 
+  // 二维码带上访问码，扫码即可直接进入，无需再手输
+  const withAccessKey = (u: string) => {
+    if (!u || !accessKey) return u;
+    return `${u}${u.includes('?') ? '&' : '?'}k=${accessKey}`;
+  };
+
   const handleCopy = () => {
     if (displayAddress) {
       safeCopyText(displayAddress).then(() => {
@@ -872,14 +880,14 @@ const UserProfileCard = ({
       <QrCodeModal
         isOpen={showQrCode}
         onClose={() => setShowQrCode(false)}
-        url={displayAddress}
+        url={withAccessKey(displayAddress)}
       />
       <HotspotQrModal
         isOpen={showHotspotQr}
         onClose={() => setShowHotspotQr(false)}
         ssid={hotspotSsid}
         password={hotspotPassword}
-        url={hotspotUrl}
+        url={withAccessKey(hotspotUrl)}
       />
       <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
         <div className="flex items-center gap-2.5">
@@ -985,6 +993,13 @@ const UserProfileCard = ({
               ? '已切换为热点地址：其他设备连上本机热点后，用此地址访问。'
               : '在同一 Wi-Fi 下的设备浏览器中输入此地址即可互传文件。'}
           </p>
+          {isHost && accessKey && (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500">
+              <span>访问码</span>
+              <span className="font-mono font-semibold tracking-[0.18em] text-slate-800">{accessKey}</span>
+              <span className="text-slate-400">其它设备访问需输入，扫码可自动带上</span>
+            </div>
+          )}
           <style>{`
             @keyframes marquee {
               0% { transform: translateX(0); }
@@ -3458,6 +3473,7 @@ const Home = () => {
               onOpenSettings={() => setShowSettings(true)}
               version={config?.version}
               build={config?.build}
+              accessKey={config?.access_key}
               onRefreshIp={refreshIpConfig}
             />
 

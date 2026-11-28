@@ -1,6 +1,8 @@
 import os
 import socket
 import shutil
+import hmac
+import secrets
 import sys
 import threading
 import time
@@ -28,7 +30,7 @@ except ImportError:
     wintypes = None
 
 try:
-    from flask import Flask, render_template, request, send_from_directory, jsonify
+    from flask import Flask, Response, render_template, request, send_from_directory, jsonify
 except ImportError:
     print("[致命错误] Flask 未安装! 请在 Pydroid 终端执行: pip install flask")
     sys.exit(1)
@@ -135,6 +137,47 @@ def save_config(cfg):
         pass
 
 _config = load_config()
+
+# ===== 局域网访问码（安全门禁）=====
+def _ensure_access_key():
+    key = str(_config.get('access_key') or '').strip()
+    if len(key) != 6 or not key.isdigit():
+        key = ''.join(secrets.choice('0123456789') for _ in range(6))
+        _config['access_key'] = key
+        save_config(_config)
+    return key
+
+ACCESS_KEY = _ensure_access_key()
+ACCESS_ENABLED = bool(_config.get('access_enabled', True))
+_UNLOCK_FAILS = {}
+_UNLOCK_HTML = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>QuickSend 访问验证</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f1f5f9;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#fff;padding:28px 24px;border-radius:16px;box-shadow:0 10px 30px rgba(15,23,42,.12);width:300px}
+h1{font-size:18px;margin:0 0 8px;color:#0f172a}p{font-size:13px;color:#64748b;margin:0 0 16px}
+input{width:100%;box-sizing:border-box;padding:11px 12px;font-size:20px;letter-spacing:6px;text-align:center;border:1px solid #cbd5e1;border-radius:10px;outline:none}
+input:focus{border-color:#3b82f6}button{width:100%;margin-top:12px;padding:11px;font-size:15px;border:0;border-radius:10px;background:#0f172a;color:#fff}
+.msg{margin-top:10px;font-size:12px;color:#dc2626;min-height:16px}</style></head>
+<body><div class="card"><h1>QuickSend 访问验证</h1><p>请输入对方设备上显示的 6 位访问码</p>
+<input id="c" inputmode="numeric" maxlength="6" autocomplete="off"><button onclick="go()">进入</button>
+<div class="msg" id="m"></div></div><script>
+function go(){var c=document.getElementById('c').value.trim();if(!c)return;
+fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:c})})
+.then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})})
+.then(function(x){if(x.ok){location.href='/'}else{document.getElementById('m').textContent=x.j.error==='too_many_attempts'?'尝试过多，请稍后再试':'访问码不正确'}})
+.catch(function(){document.getElementById('m').textContent='网络错误'})}
+</script></body></html>"""
+
+
+def _access_key_valid():
+    key = (request.headers.get('X-QuickSend-Key')
+           or request.args.get('k')
+           or request.cookies.get('qs_access')
+           or '').strip()
+    return bool(key) and hmac.compare_digest(str(key), ACCESS_KEY)
+
+
+
 UPLOAD_FOLDER = _config.get('upload_folder')
 if not UPLOAD_FOLDER:
     if IS_ANDROID:
@@ -169,6 +212,57 @@ app = Flask(__name__, static_folder=STATIC_FOLDER, template_folder=STATIC_FOLDER
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024  # 16GB max upload size
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+@app.after_request
+def _remember_access_key(resp):
+    # 扫二维码进来的 ?k= 直接放行，并顺手写 Cookie，后续 /api/* 才不会被拦
+    try:
+        if ACCESS_ENABLED and request.args.get('k') and _access_key_valid():
+            if request.cookies.get('qs_access') != ACCESS_KEY:
+                resp.set_cookie('qs_access', ACCESS_KEY, max_age=30 * 24 * 3600, samesite='Lax')
+    except Exception:
+        pass
+    return resp
+
+
+@app.before_request
+def _access_gate():
+    if not ACCESS_ENABLED or request.method == 'OPTIONS':
+        return None
+    try:
+        if _is_local_request():
+            return None
+    except Exception:
+        pass
+    path = request.path or '/'
+    if path in ('/api/unlock', '/unlock', '/favicon.ico', '/api/version'):
+        return None
+    if _access_key_valid():
+        return None
+    if path.startswith('/api/'):
+        return jsonify({'error': 'need_access_code'}), 401
+    return Response(_UNLOCK_HTML, mimetype='text/html; charset=utf-8')
+
+
+@app.route('/api/unlock', methods=['POST'])
+def api_unlock():
+    ip = request.remote_addr or ''
+    now = time.time()
+    fails = [t for t in _UNLOCK_FAILS.get(ip, []) if now - t < 60]
+    if len(fails) >= 5:
+        _UNLOCK_FAILS[ip] = fails
+        return jsonify({'error': 'too_many_attempts'}), 429
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('code') or '').strip()
+    if not code or not hmac.compare_digest(code, ACCESS_KEY):
+        fails.append(now)
+        _UNLOCK_FAILS[ip] = fails
+        return jsonify({'error': 'wrong_code'}), 403
+    _UNLOCK_FAILS.pop(ip, None)
+    resp = jsonify({'message': 'ok'})
+    resp.set_cookie('qs_access', ACCESS_KEY, max_age=30 * 24 * 3600, samesite='Lax')
+    return resp
+
 VERSION = "1.0.8"
 GLOBAL_PORT = 5000
 
@@ -957,7 +1051,9 @@ def api_ip():
             'upload_dir': app.config['UPLOAD_FOLDER'],
             'allow_remote_group_create': _config.get('allow_remote_group_create', True),
             'version': VERSION,
-            'build': request.headers.get('X-QuickSend-Build', '')
+            'build': request.headers.get('X-QuickSend-Build', ''),
+            'access_enabled': ACCESS_ENABLED,
+            'access_key': ACCESS_KEY if _is_local_request() else '',
         })
     except Exception:
         return jsonify({
@@ -970,7 +1066,9 @@ def api_ip():
             'upload_dir': app.config['UPLOAD_FOLDER'],
             'allow_remote_group_create': _config.get('allow_remote_group_create', True),
             'version': VERSION,
-            'build': request.headers.get('X-QuickSend-Build', '')
+            'build': request.headers.get('X-QuickSend-Build', ''),
+            'access_enabled': ACCESS_ENABLED,
+            'access_key': ACCESS_KEY if _is_local_request() else '',
         })
 
 @app.route('/api/config', methods=['POST'])
@@ -1177,6 +1275,21 @@ def list_zip_contents():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+_UPLOAD_NAME_LOCK = threading.Lock()
+
+
+def _unique_upload_name(name):
+    """同名文件自动加 (1)(2) 后缀，避免静默覆盖"""
+    upload_dir = app.config['UPLOAD_FOLDER']
+    base, ext = os.path.splitext(name)
+    candidate = name
+    i = 1
+    while os.path.exists(os.path.join(upload_dir, candidate)):
+        candidate = f'{base}({i}){ext}'
+        i += 1
+    return candidate
+
+
 @app.route('/api/files', methods=['GET', 'POST'])
 def handle_files():
     if request.method == 'POST':
@@ -1207,8 +1320,10 @@ def handle_files():
                 safe_ext = e.replace('.', '')
                 filename = safe_base + (('.' + safe_ext) if safe_ext else '')
             os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-            save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(save_path)
+            with _UPLOAD_NAME_LOCK:
+                filename = _unique_upload_name(filename)
+                save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(save_path)
             if _config.get('use_source_date'):
                 apply_exif_date(save_path)
             log(f'[上传] 文件: {filename}, 保存路径: {save_path}, 账号: "{uploader}", 密码: {"已设置" if password else "未设置"}')
@@ -1473,34 +1588,36 @@ def upload_complete():
     filename = _safe_upload_name(data.get('filename') or '')
 
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     data_path = os.path.join(d, 'data')
     merged_size = 0
-    try:
-        if os.path.exists(data_path):
-            # 新格式：分片已按偏移写进同一个文件，直接改名即可，无需合并
-            merged_size = os.path.getsize(data_path)
-            try:
-                os.replace(data_path, save_path)
-            except OSError:
-                shutil.move(data_path, save_path)
-        else:
-            # 旧格式兜底：把 .part 分片按顺序合并
-            with open(save_path, 'wb') as out:
-                for idx in received:
-                    part_path = os.path.join(d, f'{idx}.part')
-                    if not os.path.exists(part_path):
-                        continue
-                    with open(part_path, 'rb') as fin:
-                        shutil.copyfileobj(fin, out, 1024 * 1024)
-                    merged_size += os.path.getsize(part_path)
-    except Exception as e:
-        log(f'[分片上传] 落盘失败 {upload_id}: {e}')
+    with _UPLOAD_NAME_LOCK:
+        filename = _unique_upload_name(filename)
+        save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         try:
-            os.remove(save_path)
-        except OSError:
-            pass
-        return jsonify({'error': f'合并失败: {e}'}), 500
+            if os.path.exists(data_path):
+                # 新格式：分片已按偏移写进同一个文件，直接改名即可，无需合并
+                merged_size = os.path.getsize(data_path)
+                try:
+                    os.replace(data_path, save_path)
+                except OSError:
+                    shutil.move(data_path, save_path)
+            else:
+                # 旧格式兜底：把 .part 分片按顺序合并
+                with open(save_path, 'wb') as out:
+                    for idx in received:
+                        part_path = os.path.join(d, f'{idx}.part')
+                        if not os.path.exists(part_path):
+                            continue
+                        with open(part_path, 'rb') as fin:
+                            shutil.copyfileobj(fin, out, 1024 * 1024)
+                        merged_size += os.path.getsize(part_path)
+        except Exception as e:
+            log(f'[分片上传] 落盘失败 {upload_id}: {e}')
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+            return jsonify({'error': f'合并失败: {e}'}), 500
 
     if expected_size and merged_size != expected_size:
         try:
@@ -1882,7 +1999,8 @@ def delete_file_api(filename):
     meta = load_metadata()
     entry = meta.get(filename, {})
     owner = entry.get('uploader', '')
-    if owner and uploader != owner and not _is_local_request():
+    # 有主文件：只有上传者本人或本机可删；无主文件：只允许在本机删除
+    if not _is_local_request() and (not owner or uploader != owner):
         return jsonify({'error': 'not owner'}), 403
     try:
         os.remove(os.path.join(app.config['UPLOAD_FOLDER'], filename))

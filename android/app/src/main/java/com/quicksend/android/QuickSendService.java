@@ -34,6 +34,8 @@ public class QuickSendService extends Service {
     public static final String EXTRA_URIS = "share_uris";
     /** 客户端模式：上传到指定服务器（http://ip:port） */
     public static final String EXTRA_UPLOAD_BASE = "share_upload_base";
+    /** 客户端模式：对方服务器的访问码（开了门禁时需要） */
+    public static final String EXTRA_UPLOAD_KEY = "share_upload_key";
     /** 客户端模式：只做上传，不启动本机 Python 服务 */
     public static final String EXTRA_CLIENT_ONLY = "share_client_only";
     private static final String TAG = "QuickSend";
@@ -46,6 +48,7 @@ public class QuickSendService extends Service {
     private static volatile boolean pythonLaunched = false;
     private volatile boolean shareRunning = false;
     private volatile String shareBaseUrl = null;
+    private volatile String shareAccessKey = null;
     private volatile boolean clientOnlyUpload = false;
     private long lastShareNotifyAt = 0L;
     private final List<Uri> pendingShareUris = Collections.synchronizedList(new ArrayList<>());
@@ -65,6 +68,7 @@ public class QuickSendService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null) {
             shareBaseUrl = intent.getStringExtra(EXTRA_UPLOAD_BASE);
+            shareAccessKey = intent.getStringExtra(EXTRA_UPLOAD_KEY);
             clientOnlyUpload = intent.getBooleanExtra(EXTRA_CLIENT_ONLY, false);
         }
         startForegroundCompat(buildNotification(
@@ -117,7 +121,7 @@ public class QuickSendService extends Service {
             }
             final int count = batch.size();
             final int[] current = {0};
-            ShareUploadClient client = new ShareUploadClient(targetBase);
+            ShareUploadClient client = new ShareUploadClient(targetBase, shareAccessKey);
             ShareUploadClient.Result result = client.uploadAll(
                     getApplicationContext(), batch, new ShareUploadClient.Listener() {
                         @Override
