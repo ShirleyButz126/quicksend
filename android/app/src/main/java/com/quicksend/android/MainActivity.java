@@ -80,7 +80,12 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private TextView splash;
     private TextView clientBadge;
     private ImageView clientScanButton;
+    private TextView clientRefreshButton;
     private boolean scanForClientSwitch = false;
+    private int clientRetryCount = 0;
+    private long clientSwitchAt = 0L;
+    private boolean clientRetryPending = false;
+    private boolean clientRetryToastShown = false;
     private FrameLayout rootView;
     private ValueCallback<Uri[]> fileCallback;
 
@@ -172,6 +177,23 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         scanParams.gravity = Gravity.TOP | Gravity.END;
         scanParams.setMargins(0, dp(14), dp(16), 0);
         rootView.addView(clientScanButton, scanParams);
+
+        // 客户端模式：扫码按钮下方再加一个刷新按钮，网络刚切换/服务器刚启动时手动重试
+        clientRefreshButton = new TextView(this);
+        clientRefreshButton.setText("↻");
+        clientRefreshButton.setTextSize(20);
+        clientRefreshButton.setTextColor(Color.WHITE);
+        clientRefreshButton.setGravity(Gravity.CENTER);
+        clientRefreshButton.setBackgroundResource(R.drawable.bg_badge_dark);
+        clientRefreshButton.setContentDescription("刷新页面");
+        clientRefreshButton.setVisibility(View.GONE);
+        clientRefreshButton.setOnClickListener(v -> {
+            if (webView != null) webView.reload();
+        });
+        FrameLayout.LayoutParams refreshParams = new FrameLayout.LayoutParams(dp(44), dp(44));
+        refreshParams.gravity = Gravity.TOP | Gravity.END;
+        refreshParams.setMargins(0, dp(66), dp(16), 0);
+        rootView.addView(clientRefreshButton, refreshParams);
 
         setContentView(rootView);
 
@@ -460,6 +482,10 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     Toast.makeText(MainActivity.this,
                             "加载页面失败 (错误 " + errorCode + "): " + description, Toast.LENGTH_LONG).show();
                 }
+                if ("client".equals(runMode) && clientUrl != null && failingUrl != null
+                        && failingUrl.startsWith(clientUrl)) {
+                    scheduleClientRetry();
+                }
             }
 
             @Override
@@ -471,6 +497,10 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                     Log.e("QuickSend", "HTTP error on main frame: " + code + " " + request.getUrl());
                     Toast.makeText(MainActivity.this,
                             "服务器返回错误: HTTP " + code, Toast.LENGTH_LONG).show();
+                    if ("client".equals(runMode) && code >= 500
+                            && clientUrl != null && request.getUrl().toString().startsWith(clientUrl)) {
+                        scheduleClientRetry();
+                    }
                 }
             }
 
@@ -479,6 +509,10 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
                 super.onPageFinished(view, url);
                 String title = view.getTitle();
                 Log.i("QuickSend", "WebView page finished: " + url + " title=" + title);
+                if ("client".equals(runMode) && url != null && clientUrl != null
+                        && url.startsWith(clientUrl)) {
+                    clientRetryCount = 0;
+                }
                 if (!"client".equals(runMode) && url != null && url.startsWith("http://127.0.0.1")) {
                     view.evaluateJavascript(
                             "if(window.__quicksend&&window.__quicksend.onModeInfo){"
@@ -926,9 +960,18 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         }
         Log.i("QuickSend", "enter client mode: " + clientUrl);
         Toast.makeText(this, "客户端模式：" + clientUrl, Toast.LENGTH_SHORT).show();
+        resetClientRetry();
         webView.loadUrl(clientUrl);
         // 冷启动就是分享进来的文件：上传到对方服务器
         handleShareIntent(getIntent());
+    }
+
+    /** 每次进入/切换客户端地址时重置自动重试状态 */
+    private void resetClientRetry() {
+        clientSwitchAt = System.currentTimeMillis();
+        clientRetryCount = 0;
+        clientRetryPending = false;
+        clientRetryToastShown = false;
     }
 
     private void showClientBadge(boolean show) {
@@ -937,6 +980,9 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
         }
         if (clientScanButton != null) {
             clientScanButton.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
+        if (clientRefreshButton != null) {
+            clientRefreshButton.setVisibility(show ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -953,6 +999,8 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     /** 模式选择框：服务器 / 自动 / 客户端（客户端可输入地址或扫码） */
     private void showModeDialog(final boolean startup) {
         if (isFinishing()) return;
+        // 模式对话框里的扫码只负责填地址，不触发「切换服务器」
+        scanForClientSwitch = false;
 
         final LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -1091,10 +1139,11 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     private void startScan() {
         try {
             IntentIntegrator integrator = new IntentIntegrator(this);
+            integrator.setCaptureActivity(PortraitCaptureActivity.class);
             integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
             integrator.setPrompt("扫描 QuickSend 地址二维码");
             integrator.setBeepEnabled(false);
-            integrator.setOrientationLocked(false);
+            integrator.setOrientationLocked(true);
             integrator.initiateScan();
         } catch (Throwable t) {
             Toast.makeText(this, "无法打开扫码：" + t.getMessage(), Toast.LENGTH_LONG).show();
@@ -1110,10 +1159,34 @@ public class MainActivity extends Activity implements HotspotHelper.HotspotState
     /** 切换到扫码得到的服务器地址，并记住它 */
     private void switchClientServer(String url) {
         clientUrl = url;
+        resetClientRetry();
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(KEY_CLIENT_URL, url).apply();
         Toast.makeText(this, "已切换服务器：" + url, Toast.LENGTH_SHORT).show();
         Log.i("QuickSend", "client switch to " + url);
         if (webView != null) webView.loadUrl(url);
+    }
+
+    /**
+     * 刚切换服务器时对方可能还没启动完 / 手机还没连上对方热点：
+     * 主框架加载失败后的 30 秒内自动重试，超过则交给用户点刷新按钮。
+     */
+    private void scheduleClientRetry() {
+        if (!"client".equals(runMode) || isFinishing() || clientRetryPending) return;
+        long since = System.currentTimeMillis() - clientSwitchAt;
+        if (since > 30000L) return;
+        clientRetryCount++;
+        clientRetryPending = true;
+        int delay = Math.min(6000, 2000 * clientRetryCount);
+        if (!clientRetryToastShown) {
+            clientRetryToastShown = true;
+            Toast.makeText(this, "服务器暂未就绪，正在自动重试…", Toast.LENGTH_SHORT).show();
+        }
+        networkHandler.postDelayed(() -> {
+            clientRetryPending = false;
+            if ("client".equals(runMode) && clientUrl != null && !clientUrl.isEmpty() && !isFinishing()) {
+                webView.loadUrl(clientUrl);
+            }
+        }, delay);
     }
 
     /** 把 "192.168.1.5" / "192.168.1.5:5000" / 二维码文本规范成 http://host[:port] */
